@@ -1,0 +1,8 @@
+streamlit
+pandas
+openpyxl
+requests
+pillow
+pymupdf
+plotly
+PyMuPDF>=1.23.0
