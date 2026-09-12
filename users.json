@@ -1,0 +1,18 @@
+{
+  "halawa1981@gmail.com": {
+    "name": "م/ محمد حلاوة (System Owner)",
+    "password_hash": "8adbc89ec18927353e3f805d44c2dad05a6a7aff1437cd746c195cf97a57a00b",
+    "role": "Admin",
+    "allowed_projects": "All",
+    "must_change_password": false
+  },
+  "mohamedhassan0014@gmail.com": {
+    "name": "م/ محمد حسن",
+    "password_hash": "d4629b0c3b04f5c330279f1ec8d45ce0348b37263629fa35573b094e0de5ed2d",
+    "role": "Accountant",
+    "allowed_projects": [
+      "مشروع مول 6 أكتوبر"
+    ],
+    "must_change_password": true
+  }
+}

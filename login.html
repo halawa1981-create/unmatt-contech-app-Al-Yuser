@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Anmatt Contech — Login | Invoice Smart System</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background: #080D1A;
+      color: #F8FAFC;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      overflow-x: hidden;
+    }
+
+    /* الشريط العلوي */
+    .top-bar {
+      width: 100%;
+      max-width: 1560px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: #64748B;
+      font-size: 13px;
+      margin-bottom: 16px;
+      padding: 0 8px;
+    }
+    .top-badge {
+      background: #1E293B;
+      color: #38BDF8;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-weight: 800;
+      font-size: 11.5px;
+    }
+
+    /* الحاوية المتجاوبة بمقاس Full HD 1920x1080 */
+    .login-container {
+      width: 100%;
+      max-width: 1560px;
+      min-height: 720px;
+      display: flex;
+      border-radius: 24px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 25px 60px -15px rgba(0, 0, 0, 0.7);
+    }
+
+    /* الجانب الأيسر: لوحة الهوية والميزات (62%) */
+    .brand-panel {
+      flex: 0 0 62%;
+      background: radial-gradient(circle at 15% 15%, #132742 0%, #08111E 65%, #050B14 100%);
+      padding: 55px 60px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      position: relative;
+      border-right: 1px solid rgba(255, 255, 255, 0.08);
+      overflow: hidden;
+    }
+
+    .brand-panel::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background-image: 
+        linear-gradient(rgba(56, 189, 248, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(56, 189, 248, 0.035) 1px, transparent 1px);
+      background-size: 40px 40px;
+      pointer-events: none;
+    }
+
+    .glow-cyan {
+      position: absolute;
+      width: 500px;
+      height: 500px;
+      background: radial-gradient(circle, rgba(14, 165, 233, 0.15) 0%, transparent 70%);
+      top: -80px;
+      left: 20%;
+      filter: blur(70px);
+      pointer-events: none;
+    }
+
+    .brand-header {
+      position: relative;
+      z-index: 2;
+    }
+    .logo-wrapper {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 22px;
+    }
+    .anmatt-logo-svg {
+      height: 60px;
+      width: auto;
+      filter: drop-shadow(0 4px 14px rgba(14, 165, 233, 0.35));
+    }
+    .brand-names {
+      display: flex;
+      flex-direction: column;
+    }
+    .brand-title {
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      color: #FFFFFF;
+      line-height: 1.1;
+    }
+    .brand-title span { color: #38BDF8; font-weight: 600; }
+    .brand-sub {
+      font-size: 11.5px;
+      font-weight: 700;
+      color: #94A3B8;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      margin-top: 4px;
+    }
+
+    .system-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(14, 165, 233, 0.12);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      padding: 6px 14px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #E0F2FE;
+      margin-bottom: 20px;
+      box-shadow: 0 4px 14px rgba(14, 165, 233, 0.15);
+    }
+    .system-badge-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #38BDF8;
+      box-shadow: 0 0 10px #38BDF8;
+    }
+
+    .hero-headline {
+      font-size: 42px;
+      font-weight: 800;
+      line-height: 1.2;
+      letter-spacing: -0.03em;
+      color: #FFFFFF;
+      max-width: 720px;
+      margin-bottom: 30px;
+    }
+    .hero-headline .highlight {
+      background: linear-gradient(135deg, #FFFFFF 30%, #93C5FD 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    /* شبكة الركائز الثلاث */
+    .pillars-grid {
+      position: relative;
+      z-index: 2;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+
+    .pillar-card {
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 16px;
+      padding: 16px 14px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      box-shadow: 0 14px 30px -6px rgba(0, 0, 0, 0.45);
+      transition: transform 0.2s ease;
+    }
+    .pillar-card:hover { transform: translateY(-2px); }
+    .pillar-card.p-orange { border-top: 3.5px solid #F97316; }
+    .pillar-card.p-green { border-top: 3.5px solid #10B981; }
+    .pillar-card.p-cyan { border-top: 3.5px solid #0EA5E9; }
+
+    .graphic-box {
+      width: 100%;
+      height: 110px;
+      border-radius: 12px;
+      background: rgba(8, 14, 26, 0.95);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 12px;
+      overflow: hidden;
+    }
+
+    .pillar-tag {
+      font-size: 10.5px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 4px;
+    }
+    .p-orange .pillar-tag { color: #FB923C; }
+    .p-green .pillar-tag { color: #34D399; }
+    .p-cyan .pillar-tag { color: #38BDF8; }
+
+    .pillar-title {
+      font-size: 14.5px;
+      font-weight: 800;
+      color: #F8FAFC;
+      line-height: 1.3;
+    }
+
+    /* الجانب الأيمن: بطاقة تسجيل الدخول (38%) */
+    .auth-panel {
+      flex: 0 0 38%;
+      background: #FFFFFF;
+      color: #0F172A;
+      padding: 60px 50px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      position: relative;
+    }
+
+    .auth-heading {
+      font-size: 32px;
+      font-weight: 800;
+      color: #0F172A;
+      letter-spacing: -0.02em;
+      margin-bottom: 6px;
+    }
+    .auth-subheading {
+      font-size: 15px;
+      color: #64748B;
+      margin-bottom: 34px;
+    }
+
+    .form-group { margin-bottom: 22px; }
+    .form-label {
+      display: block;
+      font-size: 13.5px;
+      font-weight: 700;
+      color: #334155;
+      margin-bottom: 8px;
+    }
+    .form-input {
+      width: 100%;
+      height: 50px;
+      padding: 0 16px;
+      border: 1.5px solid #CBD5E1;
+      border-radius: 10px;
+      font-size: 15px;
+      color: #0F172A;
+      background: #F8FAFC;
+      outline: none;
+      transition: all 0.15s ease;
+    }
+    .form-input:focus {
+      border-color: #0284C7;
+      background: #FFFFFF;
+      box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.15);
+    }
+
+    .form-options {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+      margin-bottom: 28px;
+      color: #475569;
+    }
+    .remember-label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .forgot-link {
+      color: #0284C7;
+      font-weight: 700;
+      text-decoration: none;
+    }
+
+    .signin-btn {
+      width: 100%;
+      height: 52px;
+      background: linear-gradient(135deg, #0284C7 0%, #0369A1 100%);
+      border: none;
+      border-radius: 10px;
+      color: #FFFFFF;
+      font-size: 16px;
+      font-weight: 800;
+      cursor: pointer;
+      box-shadow: 0 6px 18px -3px rgba(2, 132, 199, 0.45);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      transition: all 0.2s ease;
+    }
+    .signin-btn:hover {
+      background: linear-gradient(135deg, #0369A1 0%, #075985 100%);
+      transform: translateY(-2px);
+    }
+
+    .auth-footer {
+      text-align: center;
+      font-size: 13.5px;
+      color: #64748B;
+      margin-top: 26px;
+    }
+    .auth-footer a {
+      color: #0284C7;
+      font-weight: 700;
+      text-decoration: none;
+    }
+
+    .security-badge {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      font-size: 12px;
+      color: #94A3B8;
+      font-weight: 600;
+      border-top: 1px solid #F1F5F9;
+      padding-top: 22px;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- شريط الترويسة العلوي -->
+  <div class="top-bar">
+    <div style="display: flex; align-items: center; gap: 10px;">
+      <span class="top-badge">CONTECH VISUAL IDENTITY</span>
+      <span style="color: #94A3B8; font-weight: 700;">Anmatt Contech — Unified Login Experience</span>
+    </div>
+    <div style="font-weight: 600;">Target: Enterprise SaaS & Field Web (1920x1080)</div>
+  </div>
+
+  <div class="login-container">
+    
+    <!-- الجانب الأيسر: لوحة الهوية -->
+    <div class="brand-panel">
+      <div class="glow-cyan"></div>
+
+      <div class="brand-header">
+        <div class="logo-wrapper">
+          <svg class="anmatt-logo-svg" viewBox="0 0 260 200" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <linearGradient id="bridgeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#0A2540" />
+                <stop offset="100%" stop-color="#061A30" />
+              </linearGradient>
+              <linearGradient id="amberGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#F59E0B" />
+                <stop offset="100%" stop-color="#D97706" />
+              </linearGradient>
+            </defs>
+            <path d="M90 25 L108 85 L98 165 L65 165 L80 95 L72 85 Z" fill="url(#bridgeGrad)" />
+            <path d="M68 165 L98 165 L88 185 L55 185 Z" fill="#041224" />
+            <path d="M30 115 H145 V127 H30 Z" fill="url(#bridgeGrad)" />
+            <rect x="75" y="127" width="16" height="38" fill="url(#bridgeGrad)" />
+            <rect x="108" y="127" width="14" height="38" fill="url(#bridgeGrad)" />
+            <path d="M90 35 Q60 85 32 115" stroke="url(#bridgeGrad)" stroke-width="4.5" fill="none" stroke-linecap="round" />
+            <line x1="90" y1="25" x2="135" y2="25" stroke="#00E5FF" stroke-width="3" />
+            <line x1="135" y1="25" x2="165" y2="65" stroke="#00E5FF" stroke-width="2.5" />
+            <line x1="165" y1="65" x2="190" y2="105" stroke="#00E5FF" stroke-width="2.5" />
+            <line x1="190" y1="105" x2="215" y2="155" stroke="#00E5FF" stroke-width="2.5" />
+            <circle cx="135" cy="25" r="7" fill="#00F0FF" />
+            <circle cx="165" cy="65" r="6" fill="#00E5FF" />
+            <circle cx="190" cy="105" r="7" fill="#00F0FF" />
+            <circle cx="215" cy="155" r="7" fill="#00F0FF" />
+            <circle cx="150" cy="150" r="7.5" fill="url(#amberGrad)" />
+            <circle cx="175" cy="140" r="6.5" fill="url(#amberGrad)" />
+          </svg>
+
+          <div class="brand-names">
+            <div class="brand-title">Anmatt <span>Contech</span></div>
+            <div class="brand-sub">AI Solutions &bull; Construction Technology</div>
+          </div>
+        </div>
+
+        <div class="system-badge">
+          <span class="system-badge-dot"></span>
+          Invoice Smart System
+        </div>
+
+        <h1 class="hero-headline">
+          Turn invoices into<br>
+          <span class="highlight">controlled project data</span>
+        </h1>
+      </div>
+
+      <!-- الركائز الثلاث -->
+      <div class="pillars-grid">
+        <div class="pillar-card p-orange">
+          <div class="graphic-box">
+            <svg width="100%" height="100%" viewBox="0 0 240 120" fill="none">
+              <rect x="35" y="20" width="60" height="75" rx="6" fill="#1E293B" stroke="#F97316" stroke-width="1.5" />
+              <line x1="28" y1="52" x2="102" y2="52" stroke="#FB923C" stroke-width="2.5" />
+              <rect x="120" y="62" width="16" height="38" rx="4" fill="#FB923C" />
+              <rect x="144" y="42" width="16" height="58" rx="4" fill="#FB923C" />
+              <rect x="168" y="26" width="16" height="74" rx="4" fill="#FB923C" />
+              <rect x="192" y="15" width="16" height="85" rx="4" fill="#F97316" />
+            </svg>
+          </div>
+          <div>
+            <div class="pillar-tag">EXTRACTION ENGINE</div>
+            <div class="pillar-title">AI Invoice Processing</div>
+          </div>
+        </div>
+
+        <div class="pillar-card p-green">
+          <div class="graphic-box">
+            <svg width="100%" height="100%" viewBox="0 0 240 120" fill="none">
+              <circle cx="75" cy="60" r="34" stroke="rgba(255,255,255,0.06)" stroke-width="14" />
+              <circle cx="75" cy="60" r="34" stroke="#10B981" stroke-width="14" stroke-dasharray="100 240" stroke-linecap="round" />
+              <rect x="135" y="28" width="75" height="20" rx="5" fill="#064E3B" stroke="#10B981" stroke-width="1" />
+              <text x="142" y="42" fill="#A7F3D0" font-size="10" font-weight="700" font-family="monospace">CBS:04-CON</text>
+              <rect x="140" y="60" width="70" height="20" rx="5" fill="#064E3B" stroke="#34D399" stroke-width="1" />
+              <text x="148" y="74" fill="#6EE7B7" font-size="10" font-weight="700" font-family="monospace">GL #5021</text>
+            </svg>
+          </div>
+          <div>
+            <div class="pillar-tag">SMART CLASSIFICATION</div>
+            <div class="pillar-title">Automated Cost Coding</div>
+          </div>
+        </div>
+
+        <div class="pillar-card p-cyan">
+          <div class="graphic-box">
+            <svg width="100%" height="100%" viewBox="0 0 240 120" fill="none">
+              <path d="M30 92 Q75 85 110 55 T170 35 T215 20" stroke="#38BDF8" stroke-width="3" fill="none" />
+              <circle cx="170" cy="35" r="4.5" fill="#FFF" stroke="#0284C7" stroke-width="2" />
+              <circle cx="215" cy="20" r="5" fill="#38BDF8" />
+              <rect x="120" y="10" width="80" height="18" rx="9" fill="#0C4A6E" stroke="#38BDF8" stroke-width="1" />
+              <text x="128" y="22" fill="#E0F2FE" font-size="9.5" font-weight="700">&uarr; Real-Time KPI</text>
+            </svg>
+          </div>
+          <div>
+            <div class="pillar-tag">EXPENDITURE ANALYSIS</div>
+            <div class="pillar-title">Real-Time Insights</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- الجانب الأيمن: كارت تسجيل الدخول الأبيض النظيف -->
+    <div class="auth-panel">
+      <div>
+        <div class="auth-heading">Welcome back</div>
+        <div class="auth-subheading">Sign in to your Anmatt workspace</div>
+
+        <form onsubmit="handleLogin(event)">
+          <div class="form-group">
+            <label class="form-label" for="email">Email</label>
+            <input type="email" id="email" class="form-input" value="halawa1981@gmail.com" required>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="password">Password</label>
+            <input type="password" id="password" class="form-input" placeholder="••••••••••••" required>
+          </div>
+
+          <div class="form-options">
+            <label class="remember-label">
+              <input type="checkbox" checked style="accent-color: #0284C7; width: 16px; height: 16px;">
+              <span>Remember me</span>
+            </label>
+            <a href="#" class="forgot-link">Forgot password?</a>
+          </div>
+
+          <button type="submit" class="signin-btn">
+            <span>Sign in</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+              <polyline points="12 5 19 12 12 19"></polyline>
+            </svg>
+          </button>
+        </form>
+
+        <div class="auth-footer">
+          Don't have an account? <a href="#">Request access</a>
+        </div>
+      </div>
+
+      <div class="security-badge">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+        </svg>
+        <span>Enterprise Grade &bull; 256-bit SSL Security Protocol</span>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    function handleLogin(e) {
+      e.preventDefault();
+      const em = document.getElementById('email').value.trim();
+      const pw = document.getElementById('password').value.trim();
+      if (!em || !pw) return;
+
+      // تمرير المعاملات للنافذة الرئيسية بسلاسة تامة
+      const currentUrl = new URL(window.top.location.href);
+      currentUrl.searchParams.set('u', em);
+      currentUrl.searchParams.set('p', pw);
+      window.top.location.href = currentUrl.toString();
+    }
+  </script>
+</body>
+</html>
