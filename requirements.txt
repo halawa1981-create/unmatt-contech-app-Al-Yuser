@@ -5,4 +5,4 @@ requests
 pillow
 pymupdf
 plotly
-PyMuPDF>=1.23.0
+PyMuPDF
