@@ -1,4 +1,14 @@
+# Secrets and runtime data — do not commit
 api_key.txt
+users.json
+invoices_local.json
+dictionary.txt
+audit_log.json
+pending_cloud_sync/
+.streamlit/
 coral-*.json
+
+# Python cache
 __pycache__/
-"git init"
+*.pyc
+*.pyo

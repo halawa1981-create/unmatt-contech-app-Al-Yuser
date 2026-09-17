@@ -14,8 +14,9 @@ import urllib.parse
 import plotly.express as px
 import plotly.graph_objects as go
 import hashlib
-import secrets
+import threading
 import string
+import secrets
 
 # ─── إدارة الملفات والمسارات ───
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -27,6 +28,8 @@ APPROVED_DATASET_FILE = os.path.join(BASE_DIR, "approved_dataset.json")
 TUNING_CONFIG_FILE = os.path.join(BASE_DIR, "tuning_config.json")
 AUDIT_LOG_FILE = os.path.join(BASE_DIR, "audit_log.json")
 API_KEY_FILE = os.path.join(BASE_DIR, "api_key.txt")
+LOCAL_INVOICES_FILE = os.path.join(BASE_DIR, "invoices_local.json")
+PENDING_SYNC_DIR = os.path.join(BASE_DIR, "pending_cloud_sync")
 
 # فحص الشعار المعتمد
 NEW_BRAND_LOGO = None
@@ -43,7 +46,7 @@ st.set_page_config(
     page_icon=favicon_img
 )
 
-DEFAULT_DICT = "أحمد عبد الرحيم صدام يصنف كمورد لمياه الشرب (التصنيف: موردين).\nضرورة تأكيد المبلغ المدفوع ومراعاة شطب طريقة الدفع ومطابقة التفقيط."
+DEFAULT_DICT = ""
 DEFAULT_PROJECTS = ["مشروع مول 6 أكتوبر"]
 CLOUD_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxRaRWmpekP-d0rwJdAupIy5N498zToYJP-LNKRUmrQcO_EPcWsSY0loXgbRiHNotRA/exec"
 
@@ -145,6 +148,48 @@ def save_tuning_config(cfg):
         return True
     except Exception: return False
 
+def ensure_hr_admin_data_files():
+    required_schema = {
+        "invoice_no": "رقم المستند أو إيصال الصرف المطبوع/المكتوب",
+        "invoice_date": "التاريخ بصيغة YYYY-MM-DD",
+        "amount": "المبلغ الإجمالي المالي كـ float (مطابقاً تماماً للتفقيط المكتوب بالحروف)",
+        "vat": 0.0,
+        "description": "البيان أو اسم المستفيد المكتوب بوضوح",
+        "category": "اختر التصنيف الأنسب من: مقاولين / موردين / مواد / معدات / عمالة / نثريات",
+        "payment_method": "حدد بدقة الخيار غير المشطوب عليه من (نقداً / شيك / تحويل)",
+        "remark": "أي ملاحظات إضافية مثل رقم الشيك أو البنك"
+    }
+    cfg = load_tuning_config()
+    needs_save = not os.path.exists(TUNING_CONFIG_FILE)
+    defaults = {
+        "company_id": "alyoser_contracting",
+        "company_name": "شركة اليسر للمقاولات",
+        "system_instruction": "أنت مراجع مالي أول ومحاسب معتمد في شركة اليسر للمقاولات. مهمتك استخراج ومطابقة بيانات فواتير ومصروفات المشاريع بدقة متناهية ومطابقة التفقيط بالأرقام بصيغة JSON.",
+        "active_tuned_model": "",
+        "use_tuned_model": False,
+        "json_schema": required_schema
+    }
+    for key, value in defaults.items():
+        if key not in cfg:
+            cfg[key] = value
+            needs_save = True
+    if not isinstance(cfg.get("json_schema"), dict):
+        cfg["json_schema"] = required_schema
+        needs_save = True
+    else:
+        for sk, sv in required_schema.items():
+            if sk not in cfg["json_schema"]:
+                cfg["json_schema"][sk] = sv
+                needs_save = True
+    if needs_save:
+        save_tuning_config(cfg)
+    if not os.path.exists(APPROVED_DATASET_FILE):
+        save_approved_dataset([])
+    else:
+        current_ds = load_approved_dataset()
+        if not isinstance(current_ds, list):
+            save_approved_dataset([])
+
 def record_learned_sample(inv_no, desc, amount, category, pay_method, project_name):
     try:
         current_db = load_training_db()
@@ -192,6 +237,12 @@ def save_projects_list_to_disk(projs):
     except Exception: return False
 
 def load_system_dictionary():
+    if os.path.exists(DICT_FILE):
+        try:
+            with open(DICT_FILE, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except Exception:
+            pass
     try:
         res = requests.get(f"{CLOUD_WEB_APP_URL}?action=get_dictionary", timeout=8)
         if res.status_code == 200:
@@ -200,12 +251,54 @@ def load_system_dictionary():
                 cloud_dict = data.get("dictionary").strip()
                 with open(DICT_FILE, "w", encoding="utf-8") as f: f.write(cloud_dict)
                 return cloud_dict
-    except Exception: pass
-    if os.path.exists(DICT_FILE):
-        try:
-            with open(DICT_FILE, "r", encoding="utf-8") as f: return f.read().strip()
-        except Exception: return DEFAULT_DICT
+    except Exception:
+        pass
     return DEFAULT_DICT
+
+def extract_party_name_from_description(description: str) -> str:
+    text = str(description or "").strip()
+    if not text:
+        return ""
+    for sep in ["وذلك عن", "وذلك مقابل", " - ", " – ", " — "]:
+        if sep in text:
+            text = text.split(sep)[0].strip()
+            break
+    text = re.sub(r"^(يصرف إلى السيد\/السادة|يصرف الي السيد\/السادة|يصرف إلى|يصرف الي|السيد\/السادة|السادة|السيد)\s*", "", text, flags=re.IGNORECASE).strip(" :-،,.")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:160]
+
+def upsert_smart_dictionary(description, category):
+    party_name = extract_party_name_from_description(description)
+    category = str(category or "").strip()
+    if len(party_name) < 2 or not category:
+        return False
+    current = str(st.session_state.get("system_dictionary") or "").strip()
+    if not current:
+        current = load_system_dictionary() or ""
+        current = str(current).strip()
+    lines = [ln.rstrip() for ln in current.splitlines() if ln.strip()]
+    new_line = f"- المورد: '{party_name}' | التصنيف المعتمد: '{category}'"
+    name_pat = re.compile(re.escape(party_name), re.IGNORECASE)
+    updated = False
+    out_lines = []
+    for ln in lines:
+        is_same_party = bool(name_pat.search(ln)) and ("تصنيف" in ln or "المورد" in ln or "يصنف" in ln)
+        if is_same_party:
+            if not updated:
+                out_lines.append(new_line)
+                updated = True
+            continue
+        out_lines.append(ln)
+    if not updated:
+        out_lines.append(new_line)
+    new_text = "\n".join(out_lines).strip()
+    if new_text == current:
+        st.session_state.system_dictionary = new_text
+        return True
+    local_ok, _cloud_ok = save_system_dictionary(new_text)
+    if local_ok:
+        st.session_state.system_dictionary = new_text
+    return local_ok
 
 def save_system_dictionary(text):
     local_saved = False
@@ -249,15 +342,186 @@ def sync_delete_to_cloud(serial_no, project_name, user_email):
         return res.status_code == 200
     except Exception: return False
 
-def save_to_cloud_storage(image, filename, row_data):
+def save_to_cloud_storage(image, filename, row_data, timeout=12):
     img_str = optimize_image_for_upload(image)
     payload = {"action": "upload_invoice", "fileName": filename, "mimeType": "image/jpeg", "fileData": img_str, "rowValues": row_data}
     try:
-        response = requests.post(CLOUD_WEB_APP_URL, json=payload, timeout=30)
+        response = requests.post(CLOUD_WEB_APP_URL, json=payload, timeout=timeout)
         res_json = response.json()
         if res_json.get("status") == "success": return res_json.get("url", ""), True
         return "", False
-    except Exception: return "", False
+    except Exception:
+        return "", False
+
+def load_local_invoices():
+    if not os.path.exists(LOCAL_INVOICES_FILE):
+        return []
+    try:
+        with open(LOCAL_INVOICES_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+def save_local_invoices(records):
+    try:
+        with open(LOCAL_INVOICES_FILE, "w", encoding="utf-8") as f:
+            json.dump(records, f, ensure_ascii=False, indent=2)
+            f.flush(); os.fsync(f.fileno())
+        return True
+    except Exception:
+        return False
+
+def invoice_match_key(r):
+    try:
+        amt = f"{float(r.get('amount') or 0):.2f}"
+    except Exception:
+        amt = "0.00"
+    return (
+        str(r.get("project", "")).strip(),
+        str(r.get("serial_no", "")).strip(),
+        str(r.get("invoice_no", "")).strip(),
+        amt,
+        str(r.get("invoice_date", "")).strip(),
+    )
+
+def merge_invoice_lists(cloud_list, local_list):
+    merged = {}
+    order = []
+    def add(rec):
+        item = dict(rec)
+        k = invoice_match_key(item)
+        if k not in merged:
+            merged[k] = item
+            order.append(k)
+            return
+        base = merged[k]
+        if item.get("cloud_synced") is False and base.get("cloud_synced") is not False:
+            keep_link = base.get("drive_link")
+            merged[k] = item
+            if keep_link and not item.get("drive_link"):
+                merged[k]["drive_link"] = keep_link
+                merged[k]["cloud_synced"] = True
+        elif item.get("drive_link") and not base.get("drive_link"):
+            base["drive_link"] = item.get("drive_link")
+            base["cloud_synced"] = True
+    for r in cloud_list or []:
+        add(r)
+    for r in local_list or []:
+        add(r)
+    return [merged[k] for k in order]
+
+def load_invoices_local_first():
+    return load_local_invoices()
+
+def record_to_cloud_row(rec):
+    type_icon = "🟢 وارد" if rec.get("doc_type") == "وارد" else "🔴 منصرف"
+    return [
+        rec.get("serial_no"), type_icon, rec.get("invoice_no"), rec.get("invoice_date"),
+        rec.get("description"), rec.get("amount"), rec.get("vat"), rec.get("payment_method"),
+        rec.get("category"), rec.get("remark"), "False", "مرفق", rec.get("project")
+    ]
+
+def save_pending_sync_image(image, project, serial_no):
+    try:
+        os.makedirs(PENDING_SYNC_DIR, exist_ok=True)
+        safe_proj = re.sub(r"[^\w\-]+", "_", str(project))[:40]
+        path = os.path.join(PENDING_SYNC_DIR, f"{safe_proj}_{serial_no}.jpg")
+        img = image.copy()
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        img.save(path, format="JPEG", quality=85)
+        return path
+    except Exception:
+        return ""
+
+def apply_pending_sync_results():
+    if "invoices_data" not in st.session_state or not os.path.isdir(PENDING_SYNC_DIR):
+        return
+    changed = False
+    for name in list(os.listdir(PENDING_SYNC_DIR)):
+        if not name.startswith("syncres_") or not name.endswith(".json"):
+            continue
+        path = os.path.join(PENDING_SYNC_DIR, name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                res = json.load(f)
+            if res.get("ok"):
+                for inv in st.session_state.invoices_data:
+                    if str(inv.get("serial_no")) == str(res.get("serial_no")) and str(inv.get("project")) == str(res.get("project")):
+                        inv["drive_link"] = res.get("url") or inv.get("drive_link", "")
+                        inv["cloud_synced"] = True
+                        img_path = inv.pop("pending_image_path", None)
+                        if img_path and os.path.exists(img_path):
+                            try: os.remove(img_path)
+                            except Exception: pass
+                        changed = True
+                        break
+            try: os.remove(path)
+            except Exception: pass
+        except Exception:
+            continue
+    if changed:
+        save_local_invoices(st.session_state.invoices_data)
+
+def cloud_sync_invoice_background(image, filename, row_data, project, serial_no):
+    url, ok = "", False
+    try:
+        url, ok = save_to_cloud_storage(image, filename, row_data, timeout=20)
+    except Exception:
+        url, ok = "", False
+    try:
+        os.makedirs(PENDING_SYNC_DIR, exist_ok=True)
+        safe_proj = re.sub(r"[^\w\-]+", "_", str(project))[:30]
+        result_path = os.path.join(PENDING_SYNC_DIR, f"syncres_{serial_no}_{safe_proj}.json")
+        with open(result_path, "w", encoding="utf-8") as f:
+            json.dump({"ok": bool(ok), "url": url or "", "serial_no": serial_no, "project": project}, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+def retry_pending_cloud_sync():
+    if "invoices_data" not in st.session_state:
+        return
+    for rec in st.session_state.invoices_data:
+        if rec.get("cloud_synced") is not False:
+            continue
+        path = rec.get("pending_image_path")
+        if not path or not os.path.exists(path):
+            continue
+        try:
+            img = Image.open(path)
+            url, ok = save_to_cloud_storage(img, rec.get("filename") or "invoice.jpg", record_to_cloud_row(rec), timeout=20)
+            if ok:
+                rec["drive_link"] = url
+                rec["cloud_synced"] = True
+                rec.pop("pending_image_path", None)
+                try: os.remove(path)
+                except Exception: pass
+        except Exception:
+            continue
+    save_local_invoices(st.session_state.invoices_data)
+
+def clean_remark_for_display(remark):
+    text = str(remark or "")
+    text = re.sub(r"\s*\|\s*\[ملحق:[^\]]*\]", "", text)
+    text = re.sub(r"\[ملحق:[^\]]*\]", "", text)
+    text = re.sub(r"(?i)\s*\|\s*[^\s|]+\.(jpg|jpeg|png|pdf|webp)(\s*-\s*p\d+)?", "", text)
+    return text.strip(" |")
+
+def collect_row_attachments(row):
+    links = []
+    main = str(row.get("drive_link") or "").strip()
+    if main.startswith("http"):
+        links.append(main)
+    extra = row.get("attachment_links") or row.get("drive_links") or []
+    if isinstance(extra, str):
+        extra = [extra]
+    for url in extra:
+        u = str(url or "").strip()
+        if u.startswith("http") and u not in links:
+            links.append(u)
+    extra_count = len(re.findall(r"\[ملحق:", str(row.get("remark") or "")))
+    return links, extra_count
 
 def normalize_date(date_str):
     if not date_str or not str(date_str).strip(): return datetime.date.today().strftime("%Y-%m-%d")
@@ -270,7 +534,7 @@ def normalize_date(date_str):
         return f"{y}-{int(m):02d}-{int(d):02d}"
     return date_clean
 
-def optimize_image_for_upload(image, max_size=(1400, 1400), quality=80):
+def optimize_image_for_upload(image, max_size=(1800, 1800), quality=88):
     img = image.copy()
     if img.mode != 'RGB': img = img.convert('RGB')
     img.thumbnail(max_size, Image.Resampling.LANCZOS)
@@ -279,10 +543,31 @@ def optimize_image_for_upload(image, max_size=(1400, 1400), quality=80):
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 def analyze_invoice_with_gemini(image, prompt_text, api_key, current_project=""):
-    img_str = optimize_image_for_upload(image, max_size=(1400, 1400), quality=80)
+    img_str = optimize_image_for_upload(image, max_size=(1800, 1800), quality=88)
     clean_key = str(api_key).strip().replace('"', '').replace("'", '').split("\n")[0].split(",")[0].strip()
     
     t_cfg = load_tuning_config()
+    if os.path.exists(TUNING_CONFIG_FILE):
+        try:
+            with open(TUNING_CONFIG_FILE, "r", encoding="utf-8") as f:
+                saved_cfg = json.load(f)
+                if isinstance(saved_cfg, dict):
+                    t_cfg.update(saved_cfg)
+        except Exception:
+            pass
+    required_schema = {
+        "invoice_no": "رقم المستند أو إيصال الصرف المطبوع/المكتوب",
+        "invoice_date": "التاريخ بصيغة YYYY-MM-DD",
+        "amount": "المبلغ الإجمالي المالي كـ float (مطابقاً تماماً للتفقيط المكتوب بالحروف)",
+        "vat": 0.0,
+        "description": "البيان أو اسم المستفيد المكتوب بوضوح",
+        "category": "اختر التصنيف الأنسب من: مقاولين / موردين / مواد / معدات / عمالة / نثريات",
+        "payment_method": "حدد بدقة الخيار غير المشطوب عليه من (نقداً / شيك / تحويل)",
+        "remark": "أي ملاحظات إضافية مثل رقم الشيك أو البنك"
+    }
+    if t_cfg.get("json_schema") != required_schema:
+        t_cfg["json_schema"] = required_schema
+        save_tuning_config(t_cfg)
     candidate_models = []
     if t_cfg.get("use_tuned_model") and t_cfg.get("active_tuned_model"):
         candidate_models.append(t_cfg.get("active_tuned_model").strip())
@@ -296,23 +581,46 @@ def analyze_invoice_with_gemini(image, prompt_text, api_key, current_project="")
     ])
 
     training_db = load_training_db()
-    learned_context = ""
+    learned_context = "\n\nأسماء الموردين وتصنيفاتهم المعتمدة فقط. يُمنع ذكر أو استخدام أي أرقام فواتير أو مبالغ أو تواريخ سابقة:\n"
+    dict_text = str(st.session_state.get("system_dictionary", "") or "").strip()
+    if not dict_text and os.path.exists(DICT_FILE):
+        try:
+            with open(DICT_FILE, "r", encoding="utf-8") as f:
+                dict_text = f.read().strip()
+        except Exception:
+            dict_text = ""
+    if dict_text:
+        learned_context += f"{dict_text}\n"
+    seen_suppliers = set()
     if training_db:
-        learned_context = "\n\nأنماط محاسبية وموردين معتمدة مسبقاً للاسترشاد:\n"
-        for item in training_db[:20]:
+        for item in training_db:
             cd = item.get("correct_data", {})
-            if cd.get("description") or float(cd.get("amount", 0)) > 0:
-                learned_context += f"- مستند رقم '{cd.get('invoice_no')}': البيان '{cd.get('description')}' | المبلغ: ({cd.get('amount')}) ج.م | التصنيف: '{cd.get('category')}'\n"
+            supplier = str(cd.get("description", "")).strip()
+            category = str(cd.get("category", "")).strip()
+            if not supplier:
+                continue
+            key = (supplier, category)
+            if key in seen_suppliers:
+                continue
+            seen_suppliers.add(key)
+            learned_context += f"- المورد: '{supplier}' | التصنيف المعتمد: '{category}'\n"
 
     sys_inst = t_cfg.get("system_instruction", "")
+    schema_json = json.dumps(t_cfg.get("json_schema", required_schema), ensure_ascii=False, indent=2)
     active_rules = f"""
 {sys_inst}
 {learned_context}
-قواعد قراءة واستخراج حاسمة لرفع الموثوقية:
-1. [أرقام المستند والمبالغ]: تحويل الأرقام الهندية/العربية بدقة (مثل ٦ = 6، ٢ = 2).
-2. [المبلغ والتفقيط]: قارن القيمة الرقمية مع النص المكتوب يدوياً تحت عبارة (فقط وقدره...) واعتمد القيمة المطابقة بدقة كـ float في خانة amount.
-3. [البيان والمستفيد]: استخرج اسم المورد أو البيان بدقة معتمدة على قاموس الشركة والأنماط السابقة.
-4. النتيجة المطلوبة كائن JSON مفرد ومباشر {{ }} فقط.
+قواعد قراءة نموذج إيصال صرف (نقداً / شيك) والمستند الحالي فقط:
+1. [رقم المستند]: اقرأ جدول الفاتورة أو إيصال الصرف الحالي واستخرج رقم المستند الفعلي المطبوع أو المكتوب بخط اليد. لا تنقل أي رقم فاتورة من حركات سابقة.
+2. [التاريخ]: اقرأ التاريخ المكتوب بخط اليد في خانة التاريخ فقط، وأعده بصيغة YYYY-MM-DD بدقة من خانة التاريخ الفعلية للمستند وليس من أرقام الحسابات أو أرقام الشيكات.
+3. [المبلغ والتفقيط]: اقرأ المبلغ الرقمي من المستند الحالي وطابقه بدقة تامة مع النص المكتوب بالحروف (مثال للتوضيح فقط: مائتان وخمسون ألف جنيه = 250000). اعتمد القيمة المطابقة كـ float في خانة amount بعد تحويل الأرقام الهندية/العربية (٦ = 6، ٢ = 2). لا تستخدم مبالغ سابقة.
+4. [البيان / الوصف]: اجمع نص خانة "يصرف إلى السيد / السادة" مع خانة "وذلك عن" المكتوبتين بخط اليد نصاً كما هما داخل description. يمنع منعاً باتاً استبدالهما بأسماء من القاموس، أو ترك description فارغاً، أو تخمينه من القاموس.
+5. [الملاحظات]: استخرج أي بيانات شيكات (رقم الشيك، اسم البنك) أو تفاصيل إضافية وضعها في خانة remark.
+6. [طريقة الدفع]: إذا كان هناك رقم شيك مدون أو محدد "شيك"، تكون طريقة الدفع "شيك"، وإلا فتكون "نقدي".
+7. إلزام بملء جميع الحقول التالية وعدم ترك أي حقل فارغاً، وخصوصاً description:
+{schema_json}
+8. النتيجة المطلوبة كائن JSON مفرد ومباشر {{ }} فقط.
+تحذير: ممنوع اختلاق أو تخمين بيانات من مستندات سابقة. اعتمد حصرياً على النص والأرقام الظاهرة في صورة المستند الحالية.
 """
     final_prompt = prompt_text + "\n" + active_rules
     headers = {'Content-Type': 'application/json'}
@@ -359,34 +667,25 @@ def analyze_invoice_with_gemini(image, prompt_text, api_key, current_project="")
     raise Exception(f"تعذر استخراج البيانات: {err_summary}")
 
 def load_users_db():
-    default_users = {
-        "halawa1981@gmail.com": {
-            "name": "م/ محمد حلاوة (Super Admin)", "password_hash": hash_password("01230030480Ab"), 
-            "role": "Super Admin", "allowed_projects": "All", "must_change_password": False
-        },
-        "admin@contech.com": {
-            "name": "مدير النظام المفوض (Company Admin)", "password_hash": hash_password("Admin#2026"),
-            "role": "Admin", "allowed_projects": "All", "must_change_password": False
-        },
-        "ceo@contech.com": {
-            "name": "الرئيس التنفيذي (CEO)", "password_hash": hash_password("Ceo#2026"),
-            "role": "CEO", "allowed_projects": "All", "must_change_password": False
-        },
-        "mohamedhassan0014@gmail.com": {
-            "name": "م/ محمد حسن", "password_hash": hash_password("Temp#2026"),
-            "role": "Accountant", "allowed_projects": ["مشروع مول 6 أكتوبر"], "must_change_password": True
-        }
-    }
     if os.path.exists(USERS_FILE):
         try:
             with open(USERS_FILE, "r", encoding="utf-8") as f:
                 saved = json.load(f)
-                if isinstance(saved, dict):
+                if isinstance(saved, dict) and saved:
                     saved.pop("admin@alyosr.com", None)
                     saved.pop("acc@alyosr.com", None)
-                    default_users.update(saved)
-        except Exception: pass
-    return default_users
+                    return saved
+        except Exception:
+            pass
+    return {
+        "halawa1981@gmail.com": {
+            "name": "م/ محمد حلاوة (System Owner)",
+            "password_hash": hash_password("01230030480Ab"),
+            "role": "Admin",
+            "allowed_projects": "All",
+            "must_change_password": False
+        }
+    }
 
 def save_users_db(users_data):
     try:
@@ -398,16 +697,147 @@ def save_users_db(users_data):
         return True
     except Exception: return False
 
+def ask_project_assistant(user_query, project_name, invoices_list, rules_dict, api_key):
+    clean_key = str(api_key).strip().replace('"', '').replace("'", '').split("\n")[0].split(",")[0].strip()
+    project_records = []
+    for inv in invoices_list or []:
+        is_del = str(inv.get("delete", False)).strip().lower() in ["true", "1", "نعم"]
+        if is_del:
+            continue
+        if str(inv.get("project", "")).strip() != str(project_name).strip():
+            continue
+        project_records.append(inv)
+
+    context_lines = []
+    for inv in project_records:
+        context_lines.append(
+            f"- السريال: {inv.get('serial_no', '')} | رقم المستند: {inv.get('invoice_no', '')} | "
+            f"التاريخ: {inv.get('invoice_date', '')} | البيان: {inv.get('description', '')} | "
+            f"المبلغ: {inv.get('amount', 0)} | طريقة الدفع: {inv.get('payment_method', '')} | "
+            f"التصنيف: {inv.get('category', '')} | الملاحظات: {inv.get('remark', '')}"
+        )
+    records_text = "\n".join(context_lines) if context_lines else "لا توجد حركات مسجلة لهذا المشروع."
+    if isinstance(rules_dict, dict):
+        rules_text = json.dumps(rules_dict, ensure_ascii=False)
+    else:
+        rules_text = str(rules_dict or "").strip()
+
+    system_prompt = (
+        f"أنت المساعد المالي لمشروع {project_name}. أجب بدقة واختصار حصرياً ومن واقع السجلات المرفقة أدناه فقط. "
+        f"اذكر أرقام المستندات والمبالغ دائماً. إذا لم تجد المعلومة في السجلات، أجب بصراحة أنها غير مدونة ولا تفترض أي مبالغ."
+    )
+    user_prompt = (
+        f"السجلات المرفقة:\n{records_text}\n\n"
+        f"قواعد المشروع (للاستئناس دون اختلاق مبالغ):\n{rules_text}\n\n"
+        f"سؤال المستخدم:\n{user_query}"
+    )
+
+    candidate_models = [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.6-flash",
+    ]
+    headers = {'Content-Type': 'application/json'}
+    payload = {
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
+        "contents": [{"parts": [{"text": user_prompt}]}],
+        "generationConfig": {"temperature": 0.2}
+    }
+
+    last_error_details = []
+    for model_name in candidate_models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={clean_key}"
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=45)
+            if response.status_code == 200:
+                res_json = response.json()
+                candidates = res_json.get('candidates', [])
+                if not candidates:
+                    continue
+                return candidates[0]['content']['parts'][0]['text']
+            last_error_details.append(f"[{model_name}: كود {response.status_code}]")
+            if response.status_code not in [404, 429, 503]:
+                break
+        except Exception as e:
+            last_error_details.append(f"[{model_name}: استثناء {str(e)[:50]}]")
+            time.sleep(0.5)
+
+    err_summary = " | ".join(last_error_details) if last_error_details else "لا يوجد استجابة من الخادم"
+    raise Exception(f"تعذر الحصول على رد المساعد: {err_summary}")
+
+def render_portal_gateway():
+    st.markdown("""
+    <style>
+    [data-testid="stSidebar"] { display: none !important; }
+    .portal-hero {
+        background: linear-gradient(135deg, #0F2545 0%, #0C4A6E 55%, #0369A1 100%);
+        border-radius: 18px; padding: 28px 32px; margin-bottom: 22px; color: #FFFFFF;
+        border: 1px solid rgba(56,189,248,0.35); box-shadow: 0 12px 32px rgba(15,37,69,0.25);
+    }
+    .portal-kicker { color: #7DD3FC; font-size: 12px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 8px; }
+    .portal-hero h1 { margin: 0 0 8px 0; font-size: 30px; font-weight: 800; color: #FFFFFF; }
+    .portal-hero p { margin: 0; color: #DBEAFE; font-size: 15px; line-height: 1.6; }
+    .portal-card {
+        background: var(--bg-card, #FFFFFF); border: 1px solid var(--border-subtle, #E2E8F0);
+        border-radius: 14px; padding: 18px 16px 14px 16px; min-height: 210px;
+        box-shadow: 0 8px 18px rgba(15,37,69,0.06);
+    }
+    .portal-card.active { border-top: 4px solid #10B981; }
+    .portal-card.soon { border-top: 4px solid #94A3B8; opacity: 0.92; }
+    .portal-card h3 { margin: 8px 0 6px 0; font-size: 16px; color: var(--text-title, #0F172A); }
+    .portal-card p { margin: 0; font-size: 12.5px; color: var(--text-muted, #64748B); line-height: 1.55; min-height: 58px; }
+    .portal-badge-on { display: inline-block; background: #ECFDF5; color: #047857; border: 1px solid #6EE7B7; border-radius: 999px; padding: 3px 10px; font-size: 11px; font-weight: 800; }
+    .portal-badge-off { display: inline-block; background: #F1F5F9; color: #64748B; border: 1px solid #CBD5E1; border-radius: 999px; padding: 3px 10px; font-size: 11px; font-weight: 800; }
+    .portal-icon { font-size: 28px; }
+    </style>
+    """, unsafe_allow_html=True)
+    st.markdown("""
+    <div class="portal-hero">
+        <div class="portal-kicker">Un-matt ConTech • Supply Chain Platform</div>
+        <h1>بوابة سلاسل الإمداد المؤسسية</h1>
+        <p>منصة موحدة لإدارة الفواتير الذكية، المستودعات، المشتريات، المواد، وذكاء سلاسل الإمداد — اختر الوحدة المطلوبة للدخول.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    cards = [
+        ("active", "🧾", "نظام الفواتير الذكي", "Invoice Smart System", "استخراج وتدقيق الفواتير وإيصالات الصرف مع المطابقة المالية والرقابة على العهدة."),
+        ("soon", "📦", "إدارة المستودعات الذكية", "Smart Warehouse", "متابعة الأرصدة وحركات الصرف والاستلام داخل مستودعات المشروع."),
+        ("soon", "🛒", "المشتريات الذكية", "Smart Procurement", "إدارة أوامر الشراء والموردين ودورة الاعتماد قبل الصرف."),
+        ("soon", "🧱", "نظام المواد الذكي", "Smart Materials", "تتبع أصناف المواد وربطها بالمقايسة والتكاليف الفعلية."),
+        ("soon", "📈", "لوحة ذكاء سلاسل الإمداد", "Supply Chain Intelligence", "مؤشرات تنفيذية للتنبيه المبكر والانحرافات وقرارات الإمداد."),
+    ]
+    cols = st.columns(5)
+    for col, (kind, icon, ar_title, en_title, desc) in zip(cols, cards):
+        badge = '<span class="portal-badge-on">مفعل</span>' if kind == "active" else '<span class="portal-badge-off">قريباً (Coming Soon)</span>'
+        with col:
+            st.markdown(f"""
+            <div class="portal-card {kind}">
+                <div class="portal-icon">{icon}</div>
+                {badge}
+                <h3>{ar_title}</h3>
+                <p><b>{en_title}</b><br>{desc}</p>
+            </div>
+            """, unsafe_allow_html=True)
+            if kind == "active":
+                if st.button("دخول النظام (مفعل)", type="primary", use_container_width=True, key="enter_smart_invoice"):
+                    st.session_state.active_portal_module = "smart_invoice"
+                    st.rerun()
+            else:
+                st.button("قريباً (Coming Soon)", disabled=True, use_container_width=True, key=f"soon_{en_title}")
+
 # ─── التهيئة الآمنة لجميع متغيرات الجلسة ───
+ensure_hr_admin_data_files()
 if "system_lang" not in st.session_state: st.session_state.system_lang = "العربية"
 if "system_theme" not in st.session_state: st.session_state.system_theme = "Light"
-if "users_db" not in st.session_state: st.session_state.users_db = load_users_db()
+st.session_state.users_db = load_users_db()
 if "projects_list" not in st.session_state: st.session_state.projects_list = load_projects_list()
-if "invoices_data" not in st.session_state: st.session_state.invoices_data = load_cloud_records()
-if "manual_training_data" not in st.session_state: st.session_state.manual_training_data = load_training_db()
-if "approved_dataset" not in st.session_state: st.session_state.approved_dataset = load_approved_dataset()
+st.session_state.invoices_data = load_invoices_local_first()
+st.session_state.manual_training_data = load_training_db()
+st.session_state.approved_dataset = load_approved_dataset()
 if "tuning_config" not in st.session_state: st.session_state.tuning_config = load_tuning_config()
-if "system_dictionary" not in st.session_state: st.session_state.system_dictionary = load_system_dictionary()
+st.session_state.system_dictionary = load_system_dictionary()
 if "pending_invoice" not in st.session_state: st.session_state.pending_invoice = None
 if "invoice_queue" not in st.session_state: st.session_state.invoice_queue = []
 if "queue_index" not in st.session_state: st.session_state.queue_index = 0
@@ -418,9 +848,13 @@ if "active_tab" not in st.session_state: st.session_state.active_tab = "records"
 if "confirm_delete_id" not in st.session_state: st.session_state.confirm_delete_id = None
 if "confirm_delete_proj" not in st.session_state: st.session_state.confirm_delete_proj = False
 if "last_created_user" not in st.session_state: st.session_state.last_created_user = None
+if "chat_messages" not in st.session_state: st.session_state.chat_messages = []
+if "active_portal_module" not in st.session_state:
+    st.session_state.active_portal_module = "custody"
 if "show_change_pwd_modal" not in st.session_state: st.session_state.show_change_pwd_modal = False
 if "logged_in" not in st.session_state: st.session_state.logged_in = (st.query_params.get("session_auth") == "auth_valid_session")
 if "current_user" not in st.session_state: st.session_state.current_user = None
+if "upload_doc_kind" not in st.session_state: st.session_state.upload_doc_kind = "out"
 
 api_key = ""
 try:
@@ -562,7 +996,7 @@ must_change = current_user_data.get("must_change_password", False) or st.session
 if must_change:
     st.markdown("""
     <div style="max-width: 650px; margin: 40px auto; background: var(--bg-card); padding: 35px; border-radius: 16px; border: 2px solid #38BDF8; box-shadow: 0 15px 35px rgba(0,0,0,0.4);">
-        <h3 style="color: #38BDF8; margin-top: 0;">🔐 تحديث كلمة المرور (Security Update)</h3>
+        <h3 style="color: #38BDF8; margin-top: 0;">🔐 تحديث كلمة المرور</h3>
         <p style="color: var(--text-muted); font-size: 14px;">يرجى تعيين كلمة مرور قوية جديدة لحسابك للمتابعة إلى لوحة التحكم.</p>
     </div>
     """, unsafe_allow_html=True)
@@ -570,8 +1004,8 @@ if must_change:
     with st.container():
         c_p1, c_p2, c_p3 = st.columns([1, 2, 1])
         with c_p2:
-            new_p1 = st.text_input("كلمة المرور الجديدة (New Password):", type="password", key="new_p1_in")
-            new_p2 = st.text_input("تأكيد كلمة المرور (Confirm Password):", type="password", key="new_p2_in")
+            new_p1 = st.text_input("كلمة المرور الجديدة:", type="password", key="new_p1_in")
+            new_p2 = st.text_input("تأكيد كلمة المرور:", type="password", key="new_p2_in")
             
             if st.button("حفظ وتأكيد كلمة المرور 🔒", type="primary", use_container_width=True):
                 if len(new_p1.strip()) < 6:
@@ -599,6 +1033,10 @@ is_super_admin = (user_role == "Super Admin")
 is_company_admin = (user_role == "Admin" or is_super_admin)
 is_ceo = (user_role == "CEO")
 is_accountant = (user_role == "Accountant")
+can_access_system_policies = str(user_role).strip() in ("Admin", "Super Admin")
+if (not can_access_system_policies) and st.session_state.get("active_tab") == "memory":
+    st.session_state.active_tab = "records"
+    st.session_state.memory_unlocked = False
 
 is_rtl = (st.session_state.system_lang == "العربية")
 dir_attr = "rtl" if is_rtl else "ltr"
@@ -609,19 +1047,33 @@ if st.session_state.system_theme == "Dark":
     <style>
     :root {{
         --bg-main: #0B1120; --bg-card: #1E293B; --bg-input: #0F172A; --border-subtle: #334155; --border-strong: #475569;
-        --text-title: #F8FAFC; --text-body: #CBD5E1; --text-muted: #94A3B8; --brand-primary: #38BDF8;
+        --text-title: #F8FAFC; --text-body: #CBD5E1; --text-muted: #94A3B8; --brand-primary: #E8B423; --brand-navy: #2C3E50; --brand-gold: #E8B423;
         --kpi-inflow-bg: rgba(6, 78, 59, 0.25); --kpi-inflow-border: #10B981; --kpi-inflow-text: #34D399;
         --kpi-outflow-bg: rgba(127, 29, 29, 0.25); --kpi-outflow-border: #EF4444; --kpi-outflow-text: #F87171;
-        --kpi-balance-bg: rgba(12, 74, 110, 0.25); --kpi-balance-border: #38BDF8; --kpi-balance-text: #38BDF8;
-        --kpi-rate-bg: rgba(120, 53, 15, 0.25); --kpi-rate-border: #F59E0B; --kpi-rate-text: #FBBF24;
-        --table-header-bg: #0F172A; --table-row-even: #1E293B; --table-row-odd: #182234; --table-row-hover: #26354D; --table-border: #334155;
+        --kpi-card-bg: #E3F4FB; --kpi-card-border: #B7D7EA; --kpi-card-accent: #E8B423; --kpi-card-label: #C9A227; --kpi-card-value: #B8860B;
+        --table-header-bg: #2C3E50; --table-row-even: #1E293B; --table-row-odd: #182234; --table-row-hover: #26354D; --table-border: #334155;
     }}
     .stApp {{ background-color: var(--bg-main) !important; color: var(--text-body) !important; direction: {dir_attr}; }}
-    section[data-testid="stSidebar"] {{ background-color: #111827 !important; border-left: 2px solid var(--border-subtle) !important; direction: {dir_attr}; }}
-    .grid-header {{ background-color: var(--table-header-bg) !important; color: var(--text-title) !important; font-weight: 900; font-size: 14px; padding: 12px 6px; border-radius: 8px 8px 0 0; text-align: center; border: 1px solid var(--table-border); position: sticky !important; top: 0 !important; z-index: 999 !important; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3) !important; }}
+    section[data-testid="stSidebar"] {{ background-color: #15202B !important; border-left: 2px solid #E8B423 !important; direction: {dir_attr}; }}
+    button[kind="primary"] {{ background: linear-gradient(135deg, #2C3E50 0%, #1A2834 100%) !important; border: 1px solid #E8B423 !important; }}
+    .grid-header {{ background-color: #2C3E50 !important; color: #FFFFFF !important; font-weight: 900; font-size: 14px; padding: 12px 6px; border-radius: 0; text-align: center; border: none; border-bottom: 3px solid #E8B423 !important; z-index: 40 !important; }}
     .grid-row-inbound {{ background-color: var(--kpi-inflow-bg) !important; color: var(--kpi-inflow-text) !important; font-weight: 700; padding: 8px 4px; border-radius: 6px; border: 1px solid var(--kpi-inflow-border); text-align: center; margin-bottom: 4px; font-size: 13px; }}
     .grid-row-outbound {{ background-color: var(--kpi-outflow-bg) !important; color: var(--kpi-outflow-text) !important; font-weight: 700; padding: 8px 4px; border-radius: 6px; border: 1px solid var(--kpi-outflow-border); text-align: center; margin-bottom: 4px; font-size: 13px; }}
     [data-testid="stFileUploader"] {{ background: var(--bg-input) !important; border: 1.5px dashed var(--border-strong) !important; border-radius: 10px; }}
+    .kpi-card {{
+        flex: 1; background: var(--kpi-card-bg) !important; border: 1px solid var(--kpi-card-border) !important;
+        border-top: 3px solid var(--kpi-card-accent) !important; padding: 18px 14px; border-radius: 10px; text-align: center;
+    }}
+    .kpi-card h5, .kpi-card h4 {{ color: var(--kpi-card-label) !important; margin: 0 !important; font-size: 17px !important; font-weight: 800 !important; text-align: center !important; }}
+    .kpi-card h3, .kpi-card h2 {{ color: var(--kpi-card-value) !important; margin: 8px 0 0 0 !important; font-size: 30px !important; font-weight: 800 !important; text-align: center !important; }}
+    .att-chip {{ display: inline-block; font-size: 12px; font-weight: 800; color: #C9A227; text-decoration: none; margin: 0 3px; }}
+    .att-chip:hover {{ color: #E8B423; }}
+    .section-banner {{
+        background-color: var(--table-header-bg); color: #FFFFFF; padding: 14px 25px; border-radius: 8px;
+        font-size: 20px; font-weight: 800; margin-bottom: 20px; text-align: {"right" if is_rtl else "left"};
+        direction: {dir_attr}; border-{"right" if is_rtl else "left"}: 6px solid var(--brand-primary);
+    }}
+    .stApp h1, .stApp h2, .stApp h3 {{ text-align: {"right" if is_rtl else "left"} !important; }}
     </style>
     """, unsafe_allow_html=True)
 else:
@@ -629,44 +1081,106 @@ else:
     <style>
     :root {{
         --bg-main: #F8FAFC; --bg-card: #FFFFFF; --border-subtle: #E2E8F0; --border-strong: #CBD5E1;
-        --text-title: #0F172A; --text-body: #334155; --text-muted: #64748B; --brand-primary: #0284C7; --brand-navy: #0F2545;
+        --text-title: #2C3E50; --text-body: #334155; --text-muted: #64748B; --brand-primary: #C9A227; --brand-navy: #2C3E50; --brand-gold: #E8B423;
         --kpi-inflow-bg: #F0FDF4; --kpi-inflow-border: #10B981; --kpi-inflow-text: #047857;
         --kpi-outflow-bg: #FEF2F2; --kpi-outflow-border: #EF4444; --kpi-outflow-text: #B91C1C;
-        --kpi-balance-bg: #F0F9FF; --kpi-balance-border: #0284C7; --kpi-balance-text: #0369A1;
-        --kpi-rate-bg: #FFFBEB; --kpi-rate-border: #F59E0B; --kpi-rate-text: #B45309;
-        --table-header-bg: #0F2545; --table-row-even: #FFFFFF; --table-row-odd: #F8FAFC; --table-row-hover: #F1F5F9; --table-border: #E2E8F0;
+        --kpi-card-bg: #E3F4FB; --kpi-card-border: #B7D7EA; --kpi-card-accent: #E8B423; --kpi-card-label: #C9A227; --kpi-card-value: #B8860B;
+        --table-header-bg: #2C3E50; --table-row-even: #FFFFFF; --table-row-odd: #F8FAFC; --table-row-hover: #F7F4EC; --table-border: #E2E8F0;
     }}
     .stApp {{ background-color: var(--bg-main) !important; color: var(--text-body) !important; direction: {dir_attr}; }}
-    section[data-testid="stSidebar"] {{ background-color: #F1F5F9 !important; border-left: 2px solid var(--border-subtle) !important; direction: {dir_attr}; }}
-    .grid-header {{ background-color: var(--table-header-bg) !important; color: #FFFFFF !important; font-weight: 900; font-size: 14px; padding: 12px 6px; border-radius: 8px 8px 0 0; text-align: center; border: 1px solid var(--table-border); position: sticky !important; top: 0 !important; z-index: 999 !important; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.15) !important; }}
+    section[data-testid="stSidebar"] {{ background-color: #F6F4EE !important; border-left: 2px solid #E8B423 !important; direction: {dir_attr}; }}
+    button[kind="primary"] {{ background: linear-gradient(135deg, #2C3E50 0%, #1A2834 100%) !important; border: 1px solid #E8B423 !important; }}
+    .grid-header {{ background-color: #2C3E50 !important; color: #FFFFFF !important; font-weight: 900; font-size: 14px; padding: 12px 6px; border-radius: 0; text-align: center; border: none; border-bottom: 3px solid #E8B423 !important; z-index: 40 !important; }}
     .grid-row-inbound {{ background-color: var(--kpi-inflow-bg) !important; color: var(--kpi-inflow-text) !important; font-weight: 700; padding: 8px 4px; border-radius: 6px; border: 1px solid var(--kpi-inflow-border); text-align: center; margin-bottom: 4px; font-size: 13px; }}
     .grid-row-outbound {{ background-color: var(--kpi-outflow-bg) !important; color: var(--kpi-outflow-text) !important; font-weight: 700; padding: 8px 4px; border-radius: 6px; border: 1px solid var(--kpi-outflow-border); text-align: center; margin-bottom: 4px; font-size: 13px; }}
     [data-testid="stFileUploader"] {{ background: var(--bg-card) !important; border: 1.5px dashed var(--border-strong) !important; border-radius: 10px; }}
+    .kpi-card {{
+        flex: 1; background: var(--kpi-card-bg) !important; border: 1px solid var(--kpi-card-border) !important;
+        border-top: 3px solid var(--kpi-card-accent) !important; padding: 18px 14px; border-radius: 10px; text-align: center;
+    }}
+    .kpi-card h5, .kpi-card h4 {{ color: var(--kpi-card-label) !important; margin: 0 !important; font-size: 17px !important; font-weight: 800 !important; text-align: center !important; }}
+    .kpi-card h3, .kpi-card h2 {{ color: var(--kpi-card-value) !important; margin: 8px 0 0 0 !important; font-size: 30px !important; font-weight: 800 !important; text-align: center !important; }}
+    .att-chip {{ display: inline-block; font-size: 12px; font-weight: 800; color: #C9A227; text-decoration: none; margin: 0 3px; }}
+    .att-chip:hover {{ color: #E8B423; }}
+    .section-banner {{
+        background-color: var(--table-header-bg); color: #FFFFFF; padding: 14px 25px; border-radius: 8px;
+        font-size: 20px; font-weight: 800; margin-bottom: 20px; text-align: {"right" if is_rtl else "left"};
+        direction: {dir_attr}; border-{"right" if is_rtl else "left"}: 6px solid var(--brand-primary);
+    }}
+    .stApp h1, .stApp h2, .stApp h3 {{ text-align: {"right" if is_rtl else "left"} !important; }}
     </style>
     """, unsafe_allow_html=True)
+
+st.markdown("""
+<style>
+.inv-table-marker { display: none !important; height: 0 !important; margin: 0 !important; padding: 0 !important; }
+.inv-table-head [data-testid="stHorizontalBlock"] {
+    background-color: #2C3E50 !important;
+    border-radius: 10px 10px 0 0 !important;
+    padding: 4px 8px 2px 8px !important;
+    margin-bottom: 0 !important;
+}
+.inv-table-head [data-testid="column"] { background-color: #2C3E50 !important; }
+div[data-testid="stVerticalBlock"][style*="overflow"]:has(.inv-table-marker) {
+    max-height: 62vh !important;
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+    border: 1px solid #E8B42355 !important;
+    border-top: none !important;
+    border-radius: 0 0 10px 10px !important;
+    padding: 6px 8px 10px 8px !important;
+    margin-top: 0 !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 if st.session_state.system_lang == "العربية":
     t = {
         "add_proj": "➕ إضافة مشروع جديد...", "proj_label": "المشروع الحالي:", "save_proj": "حفظ المشروع", "new_proj_name": "اسم المشروع الجديد:",
         "user_mgmt": "⚙️ إدارة المستخدمين", "logout": "🚪 خروج", "user_mgmt_title": "👥 لوحة التحكم في المستخدمين والصلاحيات",
-        "tab_records": "📑 جدول ومطابقة الفواتير", "tab_analytics": "📊 تحليلات ومؤشرات المشروع", "tab_memory": "⚙️ سياسات وضوابط النظام",
+        "tab_records": "📑 سجل ومطابقة الفواتير", "tab_analytics": "📊 مؤشرات وتحليلات المشروع", "tab_memory": "⚙️ سياسات وضوابط النظام",
         "metric_in": "العهدة الواردة ⬇️", "metric_out": "إجمالي المنصرف ↗️", "metric_bal": "صافي السيولة 💰", "metric_burn": "معدل الاستهلاك ⚡", "curr": "ج.م",
         "filter_title": "🔍 أدوات البحث وتصفية السجلات", "filter_cat": "📂 التصنيف:", "filter_pay": "💳 طريقة الدفع:", "filter_date": "📅 الفترة:",
         "all": "الكل", "today": "اليوم", "this_week": "هذا الأسبوع", "this_month": "هذا الشهر", "custom": "فترة مخصصة", "from_date": "من تاريخ:", "to_date": "إلى تاريخ:",
         "no_records": "لا توجد سجلات مطابقة حالياً لعرضها في الجدول", "export_excel": "📥 تصدير السجلات إلى Excel (.xlsx)",
-        "inbound": "وارد", "outbound": "منصرف", "view_att": "عرض المرفق", "col_serial": "السريال", "col_type": "نوع الحركة", "col_doc_no": "رقم المستند",
+        "inbound": "وارد", "outbound": "منصرف", "view_att": "عرض المرفق", "att_item": "مرفق", "col_serial": "السريال", "col_type": "نوع الحركة", "col_doc_no": "رقم المستند",
         "col_date": "التاريخ", "col_desc": "البيان / الوصف", "col_amount": "المبلغ", "col_vat": "الضريبة", "col_pay": "طريقة الدفع", "col_cat": "التصنيف",
         "col_remark": "الملاحظات", "col_del": "حذف", "col_att": "المرفقات",
-        "sec_reg": "🧾 تسجيل فاتورة / مستند سداد جديد", "doc_type_prompt": "نوع المستندات المرفقة:", "out_opt": "🔴 منصرف (فواتير / إيصالات صرف)", "in_opt": "🟢 وارد (سندات قبض / تحويلات)",
-        "tab_upload": "📁 رفع ملفات (صور / PDF)", "tab_paste": "📋 لصق مباشر (Ctrl + V)", "choose_files": "📂 اختر المستندات من جهازك:", "paste_hint": "💡 الصق لقطة الشاشة هنا مباشرة:",
+        "sec_reg": "🧾 تسجيل فاتورة / مستند سداد جديد", "doc_type_prompt": "نوع المستند", "out_opt": "🔴 منصرف", "in_opt": "🟢 وارد",
+        "out_opt_sub": "فواتير وإيصالات صرف", "in_opt_sub": "سندات قبض وتمويل عهدة", "doc_select": "تحديد",
+        "tab_upload": "📁 رفع ملفات", "tab_paste": "📋 لصق مباشر", "choose_files": "أسقط الملفات هنا أو اضغط للاختيار", "paste_hint": "ارفع لقطة الشاشة",
         "start_process": "بدء المعالجة واستخراج البيانات", "merge_btn": "📎 إرفاق كمرفق", "save_btn": "✅ اعتماد وحفظ كفاتورة", "dismiss_btn": "❌ استبعاد",
         "settings_title": "⚙️ الإعدادات", "lang_label": "اللغة:", "theme_label": "المظهر:", "theme_light": "☀️ نهاري", "theme_dark": "🌙 ليلي",
         "connected": "🟢 متصل", "disconnected": "🔴 غير متصل", "synced": "🟢 متزامن", "sync_btn": "🔄 مزامنة السجلات من الشيت",
-        "future_title": "🚀 خدمات المؤسسة المستقبلية", "coming_soon": "قريباً", "market_price": "📊 مقارنة أسعار السوق الفورية",
-        "market_desc": "مطابقة أسعار الفواتير مع مؤشرات مواد البناء للتنبيه بالزيادات غير المبررة.",
-        "boq_title": "🎯 الرقابة على الموازنة والـ BOQ", "boq_desc": "ربط بنود الفواتير بمقايسة المشروع للتحكم في التكاليف ومنع التجاوز.",
+        "coming_soon": "قريباً", "in_prep": "قيد التجهيز",
+        "soon_body": "هذه الوحدة قيد التجهيز وستكون متاحة في إصدار لاحق.",
+        "programs_title": "الرقابة والتحكم المالي للمشاريع",
+        "prog_custody": "إدارة الفواتير والعهد",
+        "prog_sub": "مستخلصات مقاولي الباطن",
+        "prog_client": "مستخلصات العميل",
+        "prog_exec": "التحليل المالي التنفيذي",
+        "sync_spinner": "جاري المزامنة...", "sync_done": "اكتملت المزامنة",
+        "calc_expr": "أدخل العملية الحسابية (مثال: 801*1.14):", "calc_err": "تعذر حساب التعبير",
+        "date_fmt": "التاريخ (سنة-شهر-يوم)", "process_spinner": "جاري معالجة الملفات...",
+        "api_disc": "⚠️ مفتاح الاتصال غير متصل.", "footer_brand": "Un-matt ConTch @2026",
+        "pwd_btn": "🔑 كلمة المرور", "del_proj_help": "حذف المشروع", "confirm": "تأكيد", "cancel": "إلغاء",
+        "proj_deleted": "تم حذف المشروع", "brand_fallback": "اليسر للهندسة والمقاولات",
+        "role_super": "🛡️ مدير النظام", "role_admin": "👑 مدير الشركة", "role_ceo": "💼 الرئيس التنفيذي", "role_acc": "📊 محاسب",
+        "assistant_title": "💼 المساعد المالي الذكي", "assistant_info": "تحليل مباشر لبيانات المشروع:",
+        "assistant_you": "أنت", "assistant_bot": "المساعد",
+        "assistant_placeholder": "اكتب سؤالك هنا عن فواتير ومصروفات المشروع...",
+        "assistant_clear": "مسح المحادثة 🗑️", "assistant_spinner": "جاري استرجاع البيانات والتدقيق...",
         "analytics_title": "📊 مؤشرات وتحليلات المشروع", "print_report": "🖨️ طباعة التقرير التنفيذي المعتمد (A3)",
-        "chart_cat": "توزيع المنصرف حسب التصنيف", "chart_pay": "طرق السداد المستخدمة", "audit_title": "📋 سجل العمليات وحركات الحذف",
+        "analytics_scope": "نطاق التحليل:", "analytics_all": "الكل (جميع المشاريع)", "issue_date": "تاريخ الإصدار",
+        "insights_title": "التحليل المالي والتوصيات التنفيذية",
+        "insight_kicker": "توصية تنفيذية",
+        "insight_cost_title": "تركز السيولة وأكبر بنود التكلفة",
+        "insight_cash_title": "كفاءة السيولة ومخاطر السداد",
+        "insight_rec_label": "التوصية",
+        "chart_cat": "توزيع المنصرف حسب التصنيف", "chart_pay": "طرق السداد المستخدمة", "chart_trend": "تحليل الاتجاهات الزمنية للتدفقات المالية",
+        "trend_in": "الوارد", "trend_out": "المنصرف", "audit_title": "📋 سجل العمليات وحركات الحذف",
+        "audit_col_time": "التوقيت", "audit_col_user": "المستخدم", "audit_col_action": "الإجراء", "audit_col_details": "التفاصيل",
+        "no_audit": "لا توجد حركات مسجلة حالياً.",
         "queue_info": "⏳ قائمة المراجعة: المستند رقم", "of_total": "من إجمالي",
         "calc_title": "🔢 آلة حاسبة", "calc_btn": "احسب", "calc_res": "النتيجة:"
     }
@@ -674,24 +1188,49 @@ else:
     t = {
         "add_proj": "➕ Add New Project...", "proj_label": "Current Project:", "save_proj": "Save Project", "new_proj_name": "New Project Name:",
         "user_mgmt": "⚙️ User Management", "logout": "🚪 Logout", "user_mgmt_title": "👥 User Access & Permissions Control",
-        "tab_records": "📑 Invoice Log & Reconciliation", "tab_analytics": "📊 Analytics & Reports", "tab_memory": "⚙️ System Policies & Controls",
+        "tab_records": "📑 Invoice Register & Reconciliation", "tab_analytics": "📊 Project Analytics & KPIs", "tab_memory": "⚙️ System Policies & Controls",
         "metric_in": "Total Inbound Funds ⬇️", "metric_out": "Total Expenses ↗️", "metric_bal": "Net Balance 💰", "metric_burn": "Burn Rate ⚡", "curr": "EGP",
         "filter_title": "🔍 Search & Filter Tools", "filter_cat": "📂 Category:", "filter_pay": "💳 Payment Method:", "filter_date": "📅 Period:",
         "all": "All", "today": "Today", "this_week": "This Week", "this_month": "This Month", "custom": "Custom Range", "from_date": "From:", "to_date": "To:",
         "no_records": "No matching records found to display.", "export_excel": "📥 Export to Excel (.xlsx)",
-        "inbound": "Inbound", "outbound": "Outbound", "view_att": "View File", "col_serial": "Serial", "col_type": "Type", "col_doc_no": "Doc No.",
+        "inbound": "Inbound", "outbound": "Outbound", "view_att": "View file", "att_item": "File", "col_serial": "Serial", "col_type": "Type", "col_doc_no": "Doc No.",
         "col_date": "Date", "col_desc": "Description", "col_amount": "Amount", "col_vat": "VAT", "col_pay": "Payment Method", "col_cat": "Category",
         "col_remark": "Remarks", "col_del": "Delete", "col_att": "Attachment",
-        "sec_reg": "🧾 Register Invoice / Payment Receipt", "doc_type_prompt": "Document Type:", "out_opt": "🔴 Outbound (Expense/Invoice)", "in_opt": "🟢 Inbound (Receipt/Transfer)",
-        "tab_upload": "📁 Upload Files (Images/PDF)", "tab_paste": "📋 Direct Paste (Ctrl + V)", "choose_files": "📂 Choose files from device:", "paste_hint": "💡 Paste image directly here:",
+        "sec_reg": "🧾 Register Invoice / Payment Receipt", "doc_type_prompt": "Document type", "out_opt": "🔴 Outbound", "in_opt": "🟢 Inbound",
+        "out_opt_sub": "Invoices and payment receipts", "in_opt_sub": "Receipts and custody funding", "doc_select": "Select",
+        "tab_upload": "📁 Upload files", "tab_paste": "📋 Paste image", "choose_files": "Drop files here or click to browse", "paste_hint": "Upload a screenshot",
         "start_process": "Start Processing & Extraction", "merge_btn": "📎 Attach as Document", "save_btn": "✅ Approve & Save", "dismiss_btn": "❌ Exclude",
         "settings_title": "⚙️ Settings", "lang_label": "Language:", "theme_label": "Theme:", "theme_light": "☀️ Light", "theme_dark": "🌙 Dark",
         "connected": "🟢 Connected", "disconnected": "🔴 Disconnected", "synced": "🟢 Synced", "sync_btn": "🔄 Sync Records from Sheet",
-        "future_title": "🚀 Coming Future Services", "coming_soon": "Coming Soon", "market_price": "📊 Real-Time Market Price Check",
-        "market_desc": "Match invoices against construction market indices to detect unjustified cost increases.",
-        "boq_title": "🎯 BOQ & Budget Control", "boq_desc": "Link invoices directly with project BOQ items to control costs and eliminate overspending.",
+        "coming_soon": "Coming Soon", "in_prep": "In preparation",
+        "soon_body": "This module is in preparation and will be available in a later release.",
+        "programs_title": "Project Financial Control",
+        "prog_custody": "Invoices & Custody Management",
+        "prog_sub": "Subcontractors' IPCs",
+        "prog_client": "Client's IPCs",
+        "prog_exec": "Financial Executive Analysis",
+        "sync_spinner": "Syncing...", "sync_done": "Sync complete",
+        "calc_expr": "Enter expression (e.g. 801*1.14):", "calc_err": "Could not calculate the expression",
+        "date_fmt": "Date (YYYY-MM-DD)", "process_spinner": "Processing files...",
+        "api_disc": "⚠️ API key disconnected.", "footer_brand": "Un-matt ConTch @2026",
+        "pwd_btn": "🔑 Password", "del_proj_help": "Delete project", "confirm": "Confirm", "cancel": "Cancel",
+        "proj_deleted": "Project deleted", "brand_fallback": "Al Yosser Engineering & Contracting",
+        "role_super": "🛡️ Super Admin", "role_admin": "👑 Company Admin", "role_ceo": "💼 CEO", "role_acc": "📊 Accountant",
+        "assistant_title": "💼 Smart Financial Assistant", "assistant_info": "Live analysis for project:",
+        "assistant_you": "You", "assistant_bot": "Assistant",
+        "assistant_placeholder": "Ask about this project's invoices and expenses...",
+        "assistant_clear": "Clear chat 🗑️", "assistant_spinner": "Retrieving records and reviewing...",
         "analytics_title": "📊 Project Analytics & Executive Summary", "print_report": "🖨️ Print Executive Report (A3)",
-        "chart_cat": "Expense Distribution by Category", "chart_pay": "Payment Methods Breakdown", "audit_title": "📋 Audit Trail & Deletion Log",
+        "analytics_scope": "Analysis scope:", "analytics_all": "All Projects", "issue_date": "Issue date",
+        "insights_title": "Financial Analysis & Executive Recommendations",
+        "insight_kicker": "Executive insight",
+        "insight_cost_title": "Liquidity concentration & top cost item",
+        "insight_cash_title": "Cash efficiency & payment risk",
+        "insight_rec_label": "Recommendation",
+        "chart_cat": "Expense Distribution by Category", "chart_pay": "Payment Methods Breakdown", "chart_trend": "Cashflow Trend Analysis Over Time",
+        "trend_in": "Inbound", "trend_out": "Outbound", "audit_title": "📋 Audit Trail & Deletion Log",
+        "audit_col_time": "Timestamp", "audit_col_user": "User", "audit_col_action": "Action", "audit_col_details": "Details",
+        "no_audit": "No audit logs yet.",
         "queue_info": "⏳ Review Queue: Document", "of_total": "of total",
         "calc_title": "🔢 Calculator", "calc_btn": "Calculate", "calc_res": "Result:"
     }
@@ -706,40 +1245,196 @@ with st.sidebar:
 
     if logo_b64_str:
         st.markdown(f"""
-        <div style="display: flex; justify-content: center; align-items: center; margin-bottom: 20px;">
-            <div style="width: 145px; height: 145px; border-radius: 50%; background-color: #FFFFFF; border: 3px solid #1E3A8A; box-shadow: 0px 4px 10px rgba(0,0,0,0.08); display: flex; align-items: center; justify-content: center; overflow: hidden; padding: 10px;">
-                <img src="data:image/png;base64,{logo_b64_str}" style="width: 100%; height: 100%; object-fit: contain;" />
+        <div style="display: flex; justify-content: center; align-items: center; margin: 6px 0 22px 0;">
+            <div style="width: 204px; height: 204px; border-radius: 50%; background-color: #FFFFFF; border: 3.5px solid #2C3E50; outline: 3px solid rgba(232, 180, 35, 0.45); outline-offset: 3px; box-shadow: 0 6px 16px rgba(44, 62, 80, 0.16); display: flex; align-items: center; justify-content: center; overflow: hidden; padding: 19px;">
+                <img src="data:image/png;base64,{logo_b64_str}" alt="{t['brand_fallback']}" style="width: 100%; height: 100%; object-fit: contain;" />
             </div>
         </div>
         """, unsafe_allow_html=True)
-    else: st.title("🏢 Un-matt ConTech")
-    
-    st.header(t["settings_title"])
-    lang_choice = st.radio(t["lang_label"], ["العربية", "English"], index=0 if st.session_state.system_lang == "العربية" else 1, horizontal=True)
-    if lang_choice != st.session_state.system_lang:
-        st.session_state.system_lang = lang_choice; st.rerun()
-    
-    theme_options = [t["theme_light"], t["theme_dark"]]
-    cur_th_idx = 0 if st.session_state.system_theme == "Light" else 1
-    theme_selected = st.radio(t["theme_label"], theme_options, index=cur_th_idx, horizontal=True)
-    new_theme = "Light" if theme_selected == t["theme_light"] else "Dark"
-    if new_theme != st.session_state.system_theme:
-        st.session_state.system_theme = new_theme; st.rerun()
+    else: st.title(f"🏢 {t['brand_fallback']}")
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    col_s1, col_s2 = st.columns(2)
-    with col_s1: st.caption(t["connected"] if api_key else t["disconnected"])
-    with col_s2: st.caption(t["synced"])
+    st.markdown("""
+    <style>
+    section[data-testid="stSidebar"] .block-container { padding-top: 0.6rem !important; padding-bottom: 1.4rem !important; }
+    section[data-testid="stSidebar"] .stButton button {
+        border-radius: 10px !important; font-weight: 700 !important; min-height: 42px !important;
+        white-space: normal !important; line-height: 1.35 !important;
+    }
+    section[data-testid="stSidebar"] button[kind="primary"] {
+        background: linear-gradient(135deg, #2C3E50 0%, #1A2834 100%) !important;
+        border: 1.5px solid #E8B423 !important; color: #FFFFFF !important;
+    }
+    .sb-programs-title {
+        text-align: start; font-size: 18px; font-weight: 900; color: var(--text-title, #2C3E50);
+        margin: 2px 0 12px 0; padding: 0 2px 8px 2px; letter-spacing: 0.01em; line-height: 1.35;
+        border-bottom: 3px solid #E8B423;
+    }
+    .sb-settings-title {
+        text-align: start; font-size: 18px; font-weight: 800; color: var(--text-title, #2C3E50);
+        margin: 4px 0 12px 0; padding: 0 2px;
+    }
+    .sb-program-meta {
+        text-align: start; font-size: 11px; color: var(--text-muted, #64748B);
+        margin: -4px 0 8px 2px; line-height: 1.4;
+    }
+    .sb-status-row {
+        display: flex; justify-content: space-between; align-items: center; gap: 8px;
+        margin: 8px 0 10px 0; padding: 8px 10px; background: #FFFFFF;
+        border: 1px solid #E6D9A8; border-radius: 10px;
+    }
+    .sb-status-item {
+        flex: 1; text-align: center; font-size: 12.5px; font-weight: 700; color: #2C3E50;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stVerticalBlockBorderWrapper"] {
+        background: #FFFFFF !important; border: 1px solid #E6D9A8 !important;
+        border-radius: 10px !important; padding: 10px 12px 8px 12px !important;
+        margin: 4px 0 10px 0 !important; box-shadow: none !important;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stVerticalBlockBorderWrapper"] .sb-settings-title {
+        margin: 0 0 10px 0; padding: 0 0 8px 0; text-align: start;
+        font-size: 18px; font-weight: 800; color: var(--text-title, #2C3E50);
+        border-bottom: 1px solid #E6D9A8;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stVerticalBlockBorderWrapper"] [data-testid="stRadio"] {
+        margin-bottom: 4px !important;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stVerticalBlockBorderWrapper"] [data-testid="stWidgetLabel"] p,
+    section[data-testid="stSidebar"] div[data-testid="stVerticalBlockBorderWrapper"] label p {
+        font-weight: 700 !important; font-size: 13px !important; color: #2C3E50 !important;
+        margin-bottom: 2px !important;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stVerticalBlockBorderWrapper"] [data-testid="stRadio"] > div {
+        gap: 8px !important; justify-content: flex-start !important;
+    }
+    .fin-info-card {
+        background: #FFFFFF; color: #2C3E50; border-radius: 12px; padding: 10px 12px; margin-bottom: 10px;
+        border: 1px solid #E6D9A8; border-right: 4px solid #E8B423; font-size: 13px; font-weight: 700; line-height: 1.5;
+        box-shadow: 0 2px 8px rgba(44, 62, 80, 0.05);
+    }
+    .fin-chat-wrap {
+        background: #FBF9F3; border: 1px solid #E6D9A8; border-radius: 12px; padding: 8px 8px 4px 8px;
+        margin-bottom: 8px;
+    }
+    .fin-user-bubble {
+        background: #F7F4EC; color: #2C3E50; border: 1px solid #E6D9A8;
+        border-radius: 12px 12px 4px 12px; padding: 9px 11px; margin: 7px 0 7px 10px;
+        font-size: 12.5px; line-height: 1.55; box-shadow: 0 1px 3px rgba(44, 62, 80, 0.06);
+    }
+    .fin-user-bubble b { color: #8A6A10; }
+    .fin-bot-bubble {
+        background: #F0FDF4; color: #065F46; border: 1px solid #BBF7D0;
+        border-radius: 12px 12px 12px 4px; padding: 9px 11px; margin: 7px 10px 7px 0;
+        font-size: 12.5px; line-height: 1.55; box-shadow: 0 1px 3px rgba(6, 95, 70, 0.06);
+    }
+    .fin-bot-bubble b { color: #047857; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    if st.session_state.active_portal_module not in ("custody", "subcontractor", "client", "executive"):
+        st.session_state.active_portal_module = "custody"
+
+    st.markdown(f'<div class="sb-programs-title">{t["programs_title"]}</div>', unsafe_allow_html=True)
+    program_items = [
+        ("custody", "🧾", t["prog_custody"], False),
+        ("subcontractor", "🏗️", t["prog_sub"], True),
+        ("client", "📑", t["prog_client"], True),
+        ("executive", "📊", t["prog_exec"], False),
+    ]
+    for key, icon, title, is_soon in program_items:
+        is_active = st.session_state.active_portal_module == key
+        btn_type = "primary" if is_active else "secondary"
+        if st.button(f"{icon}  {title}", use_container_width=True, type=btn_type, key=f"prog_btn_{key}"):
+            st.session_state.active_portal_module = key
+            if key == "custody":
+                st.session_state.active_tab = "records"
+            elif key == "executive":
+                st.session_state.active_tab = "analytics"
+            st.rerun()
+        if is_soon:
+            st.markdown(f'<div class="sb-program-meta">{t["coming_soon"]} — {t["in_prep"]}</div>', unsafe_allow_html=True)
+
+    st.divider()
+    with st.container(border=True):
+        st.markdown(f'<div class="sb-settings-title">{t["settings_title"]}</div>', unsafe_allow_html=True)
+        lang_choice = st.radio(t["lang_label"], ["العربية", "English"], index=0 if st.session_state.system_lang == "العربية" else 1, horizontal=True)
+        if lang_choice != st.session_state.system_lang:
+            st.session_state.system_lang = lang_choice; st.rerun()
+
+        theme_options = [t["theme_light"], t["theme_dark"]]
+        cur_th_idx = 0 if st.session_state.system_theme == "Light" else 1
+        theme_selected = st.radio(t["theme_label"], theme_options, index=cur_th_idx, horizontal=True)
+        new_theme = "Light" if theme_selected == t["theme_light"] else "Dark"
+        if new_theme != st.session_state.system_theme:
+            st.session_state.system_theme = new_theme; st.rerun()
+
+    status_left = t["connected"] if api_key else t["disconnected"]
+    st.markdown(f"""
+    <div class="sb-status-row">
+        <span class="sb-status-item">{status_left}</span>
+        <span class="sb-status-item">{t["synced"]}</span>
+    </div>
+    """, unsafe_allow_html=True)
         
     if st.button(t["sync_btn"], use_container_width=True):
-        with st.spinner("Syncing..."):
-            st.session_state.invoices_data = load_cloud_records()
-            st.toast("Sync complete!", icon="☁️")
+        with st.spinner(t["sync_spinner"]):
+            try:
+                cloud = load_cloud_records() or []
+            except Exception:
+                cloud = []
+            st.session_state.invoices_data = merge_invoice_lists(cloud, st.session_state.invoices_data)
+            retry_pending_cloud_sync()
+            apply_pending_sync_results()
+            save_local_invoices(st.session_state.invoices_data)
+            st.toast(t["sync_done"], icon="☁️")
             time.sleep(0.5); st.rerun()
+
+    assistant_proj = st.session_state.get("selected_proj") or (
+        st.session_state.projects_list[0] if st.session_state.projects_list else DEFAULT_PROJECTS[0]
+    )
+    st.divider()
+    with st.expander(t["assistant_title"], expanded=False):
+        st.markdown(f"""
+        <div class="fin-info-card">📊 {t["assistant_info"]} {assistant_proj}</div>
+        """, unsafe_allow_html=True)
+
+        st.markdown('<div class="fin-chat-wrap">', unsafe_allow_html=True)
+        for msg in st.session_state.chat_messages[-8:]:
+            safe_content = str(msg.get("content", "")).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
+            if msg["role"] == "user":
+                st.markdown(f"""
+                <div class="fin-user-bubble"><b>👤 {t["assistant_you"]}:</b><br>{safe_content}</div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div class="fin-bot-bubble"><b>🤖 {t["assistant_bot"]}:</b><br>{safe_content}</div>
+                """, unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        user_query = st.chat_input(t["assistant_placeholder"], key="assistant_chat_input")
+        if user_query:
+            st.session_state.chat_messages.append({"role": "user", "content": user_query})
+            with st.spinner(t["assistant_spinner"]):
+                try:
+                    ans = ask_project_assistant(
+                        user_query=user_query,
+                        project_name=assistant_proj,
+                        invoices_list=st.session_state.invoices_data,
+                        rules_dict=st.session_state.system_dictionary,
+                        api_key=api_key
+                    )
+                except Exception as e:
+                    ans = str(e)
+            st.session_state.chat_messages.append({"role": "assistant", "content": ans})
+            st.rerun()
+
+        if st.session_state.chat_messages:
+            if st.button(t["assistant_clear"], use_container_width=True, key="clear_assistant_chat"):
+                st.session_state.chat_messages = []
+                st.rerun()
 
     st.divider()
     with st.expander(t["calc_title"], expanded=False):
-        calc_expr = st.text_input("Expression (e.g. 801*1.14):", value="", key="quick_calc_in")
+        calc_expr = st.text_input(t["calc_expr"], value="", key="quick_calc_in")
         if st.button(t["calc_btn"], use_container_width=True):
             try:
                 clean_expr = re.sub(r'[^0-9\+\-\*\/\.\(\)\s]', '', calc_expr)
@@ -747,22 +1442,22 @@ with st.sidebar:
                     res = eval(clean_expr)
                     st.success(f"{t['calc_res']} **{res:,.2f}**")
             except Exception:
-                st.error("Error in expression")
+                st.error(t["calc_err"])
 
-    st.divider()
-    st.markdown(f"#### {t['future_title']}")
+if st.session_state.active_portal_module in ("subcontractor", "client"):
+    soon_map = {
+        "subcontractor": t["prog_sub"],
+        "client": t["prog_client"],
+    }
+    soon_title = soon_map.get(st.session_state.active_portal_module, t["coming_soon"])
     st.markdown(f"""
-    <div class="roadmap-card">
-        <span class="roadmap-badge">{t['coming_soon']}</span>
-        <div style="font-weight: bold; font-size: 13px;">{t['market_price']}</div>
-        <div style="color: var(--text-muted); font-size: 11px; margin-top: 3px;">{t['market_desc']}</div>
-    </div>
-    <div class="roadmap-card">
-        <span class="roadmap-badge">{t['coming_soon']}</span>
-        <div style="font-weight: bold; font-size: 13px;">{t['boq_title']}</div>
-        <div style="color: var(--text-muted); font-size: 11px; margin-top: 3px;">{t['boq_desc']}</div>
+    <div style="max-width: 720px; margin: 48px auto; background: var(--bg-card, #FFFFFF); border: 1px solid var(--border-subtle, #E2E8F0); border-radius: 18px; padding: 36px 32px; text-align: center; box-shadow: 0 10px 28px rgba(15,37,69,0.08);">
+        <div style="display:inline-block; background:#F1F5F9; color:#0369A1; border:1px solid #BAE6FD; border-radius:999px; padding:4px 12px; font-size:12px; font-weight:800; margin-bottom:14px;">{t["coming_soon"]}</div>
+        <h2 style="margin: 0 0 8px 0; color: var(--text-title, #0F172A);">{soon_title}</h2>
+        <p style="margin: 0; color: var(--text-muted, #64748B); font-size: 15px; line-height: 1.7;">{t["soon_body"]}</p>
     </div>
     """, unsafe_allow_html=True)
+    st.stop()
 
 col_proj, col_proj_del, col_empty, col_user = st.columns([2.0, 0.5, 0.3, 2.2])
 
@@ -774,26 +1469,27 @@ else:
     if isinstance(available_projects, str): available_projects = [available_projects]
 
 selected_proj = col_proj.selectbox(t["proj_label"], available_projects, label_visibility="collapsed")
+st.session_state.selected_proj = selected_proj
 
 with col_proj_del:
     if can_manage_projects and selected_proj != t["add_proj"]:
-        if st.button("🗑️", help="Delete Project", use_container_width=True):
+        if st.button("🗑️", help=t["del_proj_help"], use_container_width=True):
             st.session_state.confirm_delete_proj = True
 
 if st.session_state.confirm_delete_proj and can_manage_projects:
-    st.warning(f"Delete project: {selected_proj}?")
+    st.warning(f"{t['del_proj_help']}: {selected_proj}")
     c_yd, c_nd, _ = st.columns([1, 1, 4])
     with c_yd:
-        if st.button("Confirm", type="primary", use_container_width=True):
+        if st.button(t["confirm"], type="primary", use_container_width=True):
             if selected_proj in st.session_state.projects_list:
                 st.session_state.projects_list.remove(selected_proj)
                 if not st.session_state.projects_list: st.session_state.projects_list = list(DEFAULT_PROJECTS)
                 save_projects_list_to_disk(st.session_state.projects_list)
                 st.session_state.confirm_delete_proj = False
-                st.toast("Project deleted!", icon="✅")
+                st.toast(t["proj_deleted"], icon="✅")
                 time.sleep(0.5); st.rerun()
     with c_nd:
-        if st.button("Cancel", use_container_width=True):
+        if st.button(t["cancel"], use_container_width=True):
             st.session_state.confirm_delete_proj = False; st.rerun()
 
 if selected_proj == t["add_proj"] and can_manage_projects:
@@ -806,10 +1502,10 @@ if selected_proj == t["add_proj"] and can_manage_projects:
 
 with col_user:
     role_badges = {
-        "Super Admin": "🛡️ Super Admin",
-        "Admin": "👑 Company Admin",
-        "CEO": "💼 CEO",
-        "Accountant": "📊 Accountant"
+        "Super Admin": t["role_super"],
+        "Admin": t["role_admin"],
+        "CEO": t["role_ceo"],
+        "Accountant": t["role_acc"],
     }
     st.info(f"**{current_user_data['name']}** &bull; `{role_badges.get(user_role, user_role)}`")
     
@@ -818,7 +1514,7 @@ with col_user:
         if (is_company_admin or is_ceo or is_super_admin) and st.button(t["user_mgmt"], use_container_width=True):
             st.session_state.show_user_mgmt = not st.session_state.show_user_mgmt; st.rerun()
     with b_c2:
-        if st.button("🔑 كلمة المرور", use_container_width=True):
+        if st.button(t["pwd_btn"], use_container_width=True):
             st.session_state.show_change_pwd_modal = True; st.rerun()
     with b_c3:
         if st.button(t["logout"], use_container_width=True):
@@ -916,7 +1612,7 @@ balance = total_in - total_out
 burn_rate = (total_out / total_in * 100) if total_in > 0 else 0
 
 tabs_list = [t["tab_records"], t["tab_analytics"]]
-if is_company_admin or is_super_admin:
+if can_access_system_policies:
     tabs_list.append(t["tab_memory"])
 
 tab_cols = st.columns(len(tabs_list))
@@ -929,59 +1625,98 @@ for idx, tab_name in enumerate(tabs_list):
 st.markdown("<br>", unsafe_allow_html=True)
 
 if st.session_state.active_tab == "records":
+    apply_pending_sync_results()
     st.markdown(f"""
     <div style='display: flex; gap: 15px; margin-bottom: 30px;'>
-        <div style='flex: 1; background: var(--kpi-inflow-bg); border-top: 4px solid var(--kpi-inflow-border); padding: 15px; border-radius: 8px; text-align: center;'><h5 style='color: var(--kpi-inflow-text); margin: 0;'>{t["metric_in"]}</h5><h3 style='color: var(--kpi-inflow-text); margin: 5px 0 0 0;'>{total_in:,.2f} {t["curr"]}</h3></div>
-        <div style='flex: 1; background: var(--kpi-outflow-bg); border-top: 4px solid var(--kpi-outflow-border); padding: 15px; border-radius: 8px; text-align: center;'><h5 style='color: var(--kpi-outflow-text); margin: 0;'>{t["metric_out"]}</h5><h3 style='color: var(--kpi-outflow-text); margin: 5px 0 0 0;'>{total_out:,.2f} {t["curr"]}</h3></div>
-        <div style='flex: 1; background: var(--kpi-balance-bg); border-top: 4px solid var(--kpi-balance-border); padding: 15px; border-radius: 8px; text-align: center;'><h4 style='color: var(--kpi-balance-text); margin: 0;'>{t["metric_bal"]}</h4><h3 style='color: var(--kpi-balance-text); margin: 5px 0 0 0;'>{balance:,.2f} {t["curr"]}</h3></div>
-        <div style='flex: 1; background: var(--kpi-rate-bg); border-top: 4px solid var(--kpi-rate-border); padding: 15px; border-radius: 8px; text-align: center;'><h5 style='color: var(--kpi-rate-text); margin: 0;'>{t["metric_burn"]}</h5><h3 style='color: var(--kpi-rate-text); margin: 5px 0 0 0;'>{burn_rate:.1f}%</h3></div>
+        <div class="kpi-card"><h5>{t["metric_in"]}</h5><h3>{total_in:,.2f} {t["curr"]}</h3></div>
+        <div class="kpi-card"><h5>{t["metric_out"]}</h5><h3>{total_out:,.2f} {t["curr"]}</h3></div>
+        <div class="kpi-card"><h5>{t["metric_bal"]}</h5><h3>{balance:,.2f} {t["curr"]}</h3></div>
+        <div class="kpi-card"><h5>{t["metric_burn"]}</h5><h3>{burn_rate:.1f}%</h3></div>
     </div>
     """, unsafe_allow_html=True)
 
     if not is_ceo or is_super_admin:
         if len(st.session_state.invoice_queue) == 0:
             st.markdown(f"""
-            <div style="background-color: var(--table-header-bg); color: white; padding: 14px 25px; border-radius: 8px; font-size: 20px; font-weight: 800; margin-bottom: 20px; border-right: 6px solid var(--brand-primary);">
+            <div class="section-banner">
                 {t['sec_reg']}
             </div>
             """, unsafe_allow_html=True)
             
-            doc_type_opts = [t["out_opt"], t["in_opt"]]
-            doc_type_selection = st.radio(t["doc_type_prompt"], doc_type_opts, index=0, horizontal=True)
-            is_inbound = (doc_type_selection == t["in_opt"])
+            st.markdown("""
+            <style>
+            .st-key-doc_kind_out button, .st-key-doc_kind_in button {
+                min-height: 78px !important; border-radius: 12px !important; font-weight: 800 !important;
+                white-space: pre-line !important; line-height: 1.35 !important; font-size: 15px !important;
+            }
+            .st-key-doc_kind_out button[kind="primary"] { border: 2px solid #B91C1C !important; }
+            .st-key-doc_kind_in button[kind="primary"] { border: 2px solid #047857 !important; }
+            div[data-testid="stFileUploader"] { min-height: 120px; }
+            </style>
+            """, unsafe_allow_html=True)
+            kind_out = st.session_state.upload_doc_kind == "out"
+            kind_in = not kind_out
+            is_inbound = kind_in
 
-            upload_tab1, upload_tab2 = st.tabs([t["tab_upload"], t["tab_paste"]])
-            main_files = []
-            with upload_tab1:
-                uploaded = st.file_uploader(t["choose_files"], type=['jpg', 'png', 'jpeg', 'pdf'], accept_multiple_files=True)
-                if uploaded: main_files.extend(uploaded)
-                    
-            with upload_tab2:
-                st.caption(t["paste_hint"])
-                pasted_img = st.file_uploader("Upload pasted screenshot:", type=['png', 'jpg', 'jpeg'], key="paste_uploader")
-                if pasted_img: main_files.append(pasted_img)
-            
-            if st.button(t["start_process"], type="primary"):
-                if not api_key: st.error("⚠️ API key disconnected.")
-                elif not main_files: st.warning("⚠️ Please select files first.")
-                else:
-                    with st.spinner("Processing files..."):
-                        st.session_state.invoice_queue = []
-                        for file in main_files:
-                            if file.name.lower().endswith('.pdf'):
-                                doc = fitz.open(stream=file.read(), filetype="pdf")
-                                for i in range(len(doc)):
-                                    pix = doc.load_page(i).get_pixmap(dpi=130) 
-                                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                                    st.session_state.invoice_queue.append({"image": img, "name": f"{file.name} - p{i+1}"})
-                            else:
-                                img = Image.open(file)
-                                st.session_state.invoice_queue.append({"image": img, "name": file.name})
-                        st.session_state.queue_index = 0
-                        st.session_state.pending_invoice = None
-                        st.session_state.last_saved_serial = active_project_invoices[-1]["serial_no"] if active_project_invoices else None
-                        st.session_state.pending_doc_type = "وارد" if is_inbound else "منصرف"
-                        st.rerun()
+            if is_rtl:
+                col_type, col_input = st.columns([1.05, 1.55], gap="medium")
+            else:
+                col_input, col_type = st.columns([1.55, 1.05], gap="medium")
+
+            with col_type:
+                st.caption(t["doc_type_prompt"])
+                if st.button(f"{t['out_opt']}\n{t['out_opt_sub']}", use_container_width=True, type="primary" if kind_out else "secondary", key="doc_kind_out"):
+                    st.session_state.upload_doc_kind = "out"
+                    st.rerun()
+                if st.button(f"{t['in_opt']}\n{t['in_opt_sub']}", use_container_width=True, type="primary" if kind_in else "secondary", key="doc_kind_in"):
+                    st.session_state.upload_doc_kind = "in"
+                    st.rerun()
+
+            with col_input:
+                upload_tab1, upload_tab2 = st.tabs([t["tab_upload"], t["tab_paste"]])
+                main_files = []
+                with upload_tab1:
+                    uploaded = st.file_uploader(t["choose_files"], type=['jpg', 'png', 'jpeg', 'pdf'], accept_multiple_files=True, label_visibility="collapsed")
+                    if uploaded: main_files.extend(uploaded)
+                with upload_tab2:
+                    pasted_img = st.file_uploader(t["paste_hint"], type=['png', 'jpg', 'jpeg'], key="paste_uploader", label_visibility="collapsed")
+                    if pasted_img: main_files.append(pasted_img)
+                if st.button(t["start_process"], type="primary", use_container_width=True):
+                    if not api_key: st.error(t["api_disc"])
+                    elif not main_files: st.warning("⚠️ Please select files first.")
+                    else:
+                        with st.spinner(t["process_spinner"]):
+                            st.session_state.invoice_queue = []
+                            for file in main_files:
+                                file_bytes = file.read()
+                                if file.name.lower().endswith('.pdf'):
+                                    doc = fitz.open(stream=file_bytes, filetype="pdf")
+                                    for i in range(len(doc)):
+                                        page = doc.load_page(i)
+                                        rot = page.rotation
+                                        mat = fitz.Matrix(1.6, 1.6).prerotate(rot)
+                                        pix = page.get_pixmap(matrix=mat, alpha=False)
+                                        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                                        if img.height > img.width:
+                                            img = img.rotate(90, expand=True)
+                                        gray = img.convert("L")
+                                        w, h = gray.size
+                                        band = max(8, h // 8)
+                                        top_vals = gray.crop((w // 8, 0, max(w // 8 + 1, w - w // 8), band)).getdata()
+                                        bot_vals = gray.crop((w // 8, h - band, max(w // 8 + 1, w - w // 8), h)).getdata()
+                                        top_dark = sum(1 for p in top_vals if p < 160)
+                                        bot_dark = sum(1 for p in bot_vals if p < 160)
+                                        if top_dark == 0 and bot_dark > 20:
+                                            img = img.rotate(180, expand=True)
+                                        st.session_state.invoice_queue.append({"image": img, "name": f"{file.name} - p{i+1}"})
+                                else:
+                                    img = Image.open(io.BytesIO(file_bytes))
+                                    st.session_state.invoice_queue.append({"image": img, "name": file.name})
+                            st.session_state.queue_index = 0
+                            st.session_state.pending_invoice = None
+                            st.session_state.last_saved_serial = active_project_invoices[-1]["serial_no"] if active_project_invoices else None
+                            st.session_state.pending_doc_type = "وارد" if is_inbound else "منصرف"
+                            st.rerun()
 
         elif st.session_state.queue_index < len(st.session_state.invoice_queue):
             current_idx = st.session_state.queue_index
@@ -1025,7 +1760,7 @@ if st.session_state.active_tab == "records":
                 with c1:
                     inv_no = st.text_input(t["col_doc_no"], value=str(data.get("invoice_no", "")))
                 with c2:
-                    inv_date = st.text_input(f"{t['col_date']} (YYYY-MM-DD)", value=normalize_date(data.get("invoice_date", "")))
+                    inv_date = st.text_input(t["date_fmt"], value=normalize_date(data.get("invoice_date", "")))
                 
                 c3, c4 = st.columns(2)
                 with c3:
@@ -1075,52 +1810,61 @@ if st.session_state.active_tab == "records":
                         allow_save = confirm_dup
 
                     if st.button(t["save_btn"], type="primary", use_container_width=True, disabled=(not allow_save)):
-                        with st.spinner("جاري الاعتماد وتوثيق القيد..."):
+                        try:
+                            new_serial = len(active_project_invoices) + 1
+                            type_icon = "🟢 وارد" if current_type == "وارد" else "🔴 منصرف"
+                            clean_inv_date = normalize_date(inv_date)
+                            row_data = [new_serial, type_icon, inv_no, clean_inv_date, desc, amount, vat, pay_method, category, remark, "False", "مرفق", selected_proj]
+                            pending_path = save_pending_sync_image(current_item["image"], selected_proj, new_serial)
+                            new_record = {
+                                "serial_no": new_serial, "doc_type": current_type, "invoice_no": inv_no,
+                                "invoice_date": clean_inv_date, "description": desc, "remark": remark,
+                                "amount": amount, "vat": vat, "payment_method": pay_method,
+                                "category": category, "delete": False, "project": selected_proj,
+                                "filename": current_item["name"], "drive_link": "",
+                                "cloud_synced": False, "pending_image_path": pending_path
+                            }
+                            st.session_state.invoices_data.append(new_record)
+                            save_local_invoices(st.session_state.invoices_data)
+                            st.session_state.last_saved_serial = new_serial
+                            record_learned_sample(inv_no, desc, amount, category, pay_method, selected_proj)
                             try:
-                                new_serial = len(active_project_invoices) + 1
-                                type_icon = "🟢 وارد" if current_type == "وارد" else "🔴 منصرف"
-                                clean_inv_date = normalize_date(inv_date)
-                                row_data = [new_serial, type_icon, inv_no, clean_inv_date, desc, amount, vat, pay_method, category, remark, "False", "مرفق", selected_proj]
-                                drive_link, success = save_to_cloud_storage(current_item["image"], current_item["name"], row_data)
-                                if success:
-                                    st.session_state.invoices_data.append({
-                                        "serial_no": new_serial, "doc_type": current_type, "invoice_no": inv_no, 
-                                        "invoice_date": clean_inv_date, "description": desc, "remark": remark, 
-                                        "amount": amount, "vat": vat, "payment_method": pay_method, 
-                                        "category": category, "delete": False, "project": selected_proj, 
-                                        "filename": current_item["name"], "drive_link": drive_link
-                                    })
-                                    st.session_state.last_saved_serial = new_serial
-                                    record_learned_sample(inv_no, desc, amount, category, pay_method, selected_proj)
-                                    
-                                    # توثيق القيد المعتمد في مستودع العينات
-                                    approved_ds = load_approved_dataset()
-                                    approved_ds.insert(0, {
-                                        "timestamp": str(datetime.datetime.now()),
-                                        "company_id": st.session_state.tuning_config.get("company_id", "alyoser_contracting"),
-                                        "input_doc": current_item["name"],
-                                        "ground_truth": {
-                                            "invoice_no": inv_no,
-                                            "invoice_date": clean_inv_date,
-                                            "category": category,
-                                            "description": desc,
-                                            "payment_method": pay_method,
-                                            "amount": amount,
-                                            "vat": vat,
-                                            "remark": remark
-                                        }
-                                    })
-                                    save_approved_dataset(approved_ds)
-                                    st.session_state.approved_dataset = approved_ds
-                                    
-                                    log_audit_event("INSERT", f"Saved {inv_no} amount {amount:,.2f} in {selected_proj}", current_user_data.get("name", "User"), current_user_data.get("name", "User"))
-                                    st.toast("تم الحفظ وتوثيق القيد بنجاح!", icon="✅")
-                                    time.sleep(0.5)
-                                    st.session_state.pending_invoice = None
-                                    st.session_state.queue_index += 1
-                                    st.rerun()
-                                else: st.warning("تحذير في المزامنة السحابية.")
-                            except Exception as e: st.error(f"فشل الحفظ: {e}")
+                                upsert_smart_dictionary(desc, category)
+                            except Exception:
+                                pass
+                            approved_ds = load_approved_dataset()
+                            approved_ds.insert(0, {
+                                "timestamp": str(datetime.datetime.now()),
+                                "company_id": st.session_state.tuning_config.get("company_id", "alyoser_contracting"),
+                                "input_doc": current_item["name"],
+                                "ground_truth": {
+                                    "invoice_no": inv_no,
+                                    "invoice_date": clean_inv_date,
+                                    "category": category,
+                                    "description": desc,
+                                    "payment_method": pay_method,
+                                    "amount": amount,
+                                    "vat": vat,
+                                    "remark": remark
+                                }
+                            })
+                            save_approved_dataset(approved_ds)
+                            st.session_state.approved_dataset = approved_ds
+                            log_audit_event("INSERT", f"Saved {inv_no} amount {amount:,.2f} in {selected_proj}", current_user_data.get("name", "User"), current_user_data.get("name", "User"))
+
+                            img_copy = current_item["image"].copy()
+                            fname_copy = current_item["name"]
+                            sync_thread = threading.Thread(
+                                target=cloud_sync_invoice_background,
+                                args=(img_copy, fname_copy, row_data, selected_proj, new_serial),
+                                daemon=True
+                            )
+                            sync_thread.start()
+                            st.session_state.pending_invoice = None
+                            st.session_state.queue_index += 1
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"فشل الحفظ المحلي: {e}")
 
                 with c_btn_merge:
                     target_serial = st.session_state.last_saved_serial
@@ -1156,7 +1900,7 @@ if st.session_state.active_tab == "records":
     st.write("<br>", unsafe_allow_html=True)
     
     st.markdown(f"""
-    <div style="background-color: var(--table-header-bg); color: white; padding: 12px 25px; border-radius: 8px; font-size: 19px; font-weight: 800; margin-bottom: 20px; border-right: 6px solid var(--brand-primary);">
+    <div class="section-banner">
         {t['filter_title']}
     </div>
     """, unsafe_allow_html=True)
@@ -1237,7 +1981,7 @@ if st.session_state.active_tab == "records":
             t["col_vat"]: item.get("vat"), 
             t["col_pay"]: item.get("payment_method"), 
             t["col_cat"]: item.get("category"), 
-            t["col_remark"]: item.get("remark")
+            t["col_remark"]: clean_remark_for_display(item.get("remark"))
         } for item in filtered_list])
         with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer: excel_df.to_excel(writer, index=False, sheet_name=selected_proj[:30])
         ex_col1, ex_col2 = st.columns([3, 1])
@@ -1245,6 +1989,7 @@ if st.session_state.active_tab == "records":
 
     # ضبط عروض الأعمدة لضمان ظهور زر الحذف بوضوح
     grid_cols = [0.8, 1.1, 1.1, 1.2, 2.2, 1.2, 0.9, 1.3, 1.1, 1.6, 0.9, 1.1]
+    st.markdown("<div class='inv-table-head'>", unsafe_allow_html=True)
     h0, h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11 = st.columns(grid_cols)
     h0.markdown(f"<div class='grid-header'>{t['col_serial']}</div>", unsafe_allow_html=True)
     h1.markdown(f"<div class='grid-header'>{t['col_type']}</div>", unsafe_allow_html=True)
@@ -1258,104 +2003,300 @@ if st.session_state.active_tab == "records":
     h9.markdown(f"<div class='grid-header'>{t['col_remark']}</div>", unsafe_allow_html=True)
     h10.markdown(f"<div class='grid-header'>{t['col_del']}</div>", unsafe_allow_html=True)
     h11.markdown(f"<div class='grid-header'>{t['col_att']}</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    if len(filtered_list) > 0:
-        for idx, row in enumerate(filtered_list):
-            is_in = row.get("doc_type") == "وارد"
-            row_style = "grid-row-inbound" if is_in else "grid-row-outbound"
-            type_icon = f"🟢 {t['inbound']}" if is_in else f"🔴 {t['outbound']}"
-            c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11 = st.columns(grid_cols)
-            
-            c0.markdown(f"<div class='{row_style}'>{row.get('display_serial', idx+1)}</div>", unsafe_allow_html=True)
-            c1.markdown(f"<div class='{row_style}'>{type_icon}</div>", unsafe_allow_html=True)
-            c2.markdown(f"<div class='{row_style}'>{row.get('invoice_no', '')}</div>", unsafe_allow_html=True)
-            c3.markdown(f"<div class='{row_style}'>{row.get('invoice_date', '')}</div>", unsafe_allow_html=True)
-            c4.markdown(f"<div class='{row_style}'>{row.get('description', '')}</div>", unsafe_allow_html=True)
-            c5.markdown(f"<div class='{row_style}'>{float(row.get('amount', 0)):,.2f}</div>", unsafe_allow_html=True)
-            c6.markdown(f"<div class='{row_style}'>{float(row.get('vat', 0)):,.2f}</div>", unsafe_allow_html=True)
-            c7.markdown(f"<div class='{row_style}'>{row.get('payment_method', '')}</div>", unsafe_allow_html=True)
-            c8.markdown(f"<div class='{row_style}'>{row.get('category', '')}</div>", unsafe_allow_html=True)
-            c9.markdown(f"<div class='{row_style}'>{row.get('remark', '')}</div>", unsafe_allow_html=True)
-            with c10:
-                if can_delete_records:
-                    if st.button("🗑️", key=f"del_btn_{row.get('serial_no')}_{idx}", use_container_width=True, help="حذف الفاتورة"):
-                        st.session_state.confirm_delete_id = row.get("serial_no")
-                        st.rerun()
-                else:
-                    st.markdown(f"<div class='{row_style}'>🔒</div>", unsafe_allow_html=True)
-            with c11:
-                d_link = row.get('drive_link', '')
-                if d_link and str(d_link).startswith("http"):
-                    st.markdown(f"<div class='{row_style}'><a href='{d_link}' target='_blank' style='text-decoration:none; color:inherit;'>🔗 {t['view_att']}</a></div>", unsafe_allow_html=True)
-                else:
-                    st.markdown(f"<div class='{row_style}'>☁️</div>", unsafe_allow_html=True)
-    else:
-        st.markdown(f"<div style='text-align: center; color: var(--text-muted); font-weight: bold; padding: 25px; background-color: var(--bg-card); border-radius: 8px; border: 1px solid var(--border-subtle); margin-top: 5px;'>{t['no_records']}</div>", unsafe_allow_html=True)
+    with st.container(height=620, border=False):
+        st.markdown("<div class='inv-table-marker'></div>", unsafe_allow_html=True)
+        if len(filtered_list) > 0:
+            for idx, row in enumerate(filtered_list):
+                is_in = row.get("doc_type") == "وارد"
+                row_style = "grid-row-inbound" if is_in else "grid-row-outbound"
+                type_icon = f"🟢 {t['inbound']}" if is_in else f"🔴 {t['outbound']}"
+                c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11 = st.columns(grid_cols)
+                
+                c0.markdown(f"<div class='{row_style}'>{row.get('display_serial', idx+1)}</div>", unsafe_allow_html=True)
+                c1.markdown(f"<div class='{row_style}'>{type_icon}</div>", unsafe_allow_html=True)
+                c2.markdown(f"<div class='{row_style}'>{row.get('invoice_no', '')}</div>", unsafe_allow_html=True)
+                c3.markdown(f"<div class='{row_style}'>{row.get('invoice_date', '')}</div>", unsafe_allow_html=True)
+                c4.markdown(f"<div class='{row_style}'>{row.get('description', '')}</div>", unsafe_allow_html=True)
+                c5.markdown(f"<div class='{row_style}'>{float(row.get('amount', 0)):,.2f}</div>", unsafe_allow_html=True)
+                c6.markdown(f"<div class='{row_style}'>{float(row.get('vat', 0)):,.2f}</div>", unsafe_allow_html=True)
+                c7.markdown(f"<div class='{row_style}'>{row.get('payment_method', '')}</div>", unsafe_allow_html=True)
+                c8.markdown(f"<div class='{row_style}'>{row.get('category', '')}</div>", unsafe_allow_html=True)
+                c9.markdown(f"<div class='{row_style}'>{clean_remark_for_display(row.get('remark', ''))}</div>", unsafe_allow_html=True)
+                with c10:
+                    if can_delete_records:
+                        if st.button("🗑️", key=f"del_btn_{row.get('serial_no')}_{idx}", use_container_width=True, help="حذف الفاتورة"):
+                            st.session_state.confirm_delete_id = row.get("serial_no")
+                            st.rerun()
+                    else:
+                        st.markdown(f"<div class='{row_style}'>🔒</div>", unsafe_allow_html=True)
+                with c11:
+                    att_links, extra_n = collect_row_attachments(row)
+                    chips = []
+                    if att_links:
+                        for i, url in enumerate(att_links, start=1):
+                            label = t["view_att"] if len(att_links) == 1 and extra_n == 0 else f"{t['att_item']} {i}"
+                            chips.append(f"<a class='att-chip' href='{url}' target='_blank'>{label}</a>")
+                        for j in range(len(att_links) + 1, len(att_links) + extra_n + 1):
+                            chips.append(f"<span class='att-chip'>{t['att_item']} {j}</span>")
+                    elif extra_n:
+                        for i in range(1, extra_n + 1):
+                            chips.append(f"<span class='att-chip'>{t['att_item']} {i}</span>")
+                    att_html = " ".join(chips) if chips else "—"
+                    st.markdown(f"<div class='{row_style}'>{att_html}</div>", unsafe_allow_html=True)
+        else:
+            st.markdown(f"<div style='text-align: center; color: var(--text-muted); font-weight: bold; padding: 25px; background-color: var(--bg-card); border-radius: 8px; border: 1px solid var(--border-subtle); margin-top: 5px;'>{t['no_records']}</div>", unsafe_allow_html=True)
 
 elif st.session_state.active_tab == "analytics":
+    analytics_projects = [p for p in available_projects if p != t["add_proj"]]
+    if "analytics_scope" not in st.session_state:
+        st.session_state.analytics_scope = selected_proj if selected_proj in analytics_projects else "__all__"
+    if st.session_state.analytics_scope not in ["__all__"] + analytics_projects:
+        st.session_state.analytics_scope = selected_proj if selected_proj in analytics_projects else "__all__"
+
+    page_dir = "rtl" if is_rtl else "ltr"
+    align_css = "right" if is_rtl else "left"
+    issue_date_val = datetime.date.today().strftime("%Y-%m-%d")
+    chart_font = "#2C3E50" if st.session_state.system_theme == "Light" else "#F8FAFC"
+
+    st.markdown(f"""
+    <style>
+    .analytics-wrap {{ direction: {page_dir}; text-align: {align_css}; }}
+    .analytics-wrap h2, .analytics-wrap h3, .analytics-wrap h4, .analytics-wrap p {{ text-align: {align_css} !important; }}
+    .analytics-toolbar {{
+        background: var(--bg-card, #FFFFFF); border: 1px solid #E6D9A8; border-radius: 12px;
+        padding: 14px 16px; margin-bottom: 14px; box-shadow: 0 4px 12px rgba(44,62,80,0.05);
+    }}
+    .analytics-title {{ margin: 0 0 4px 0; color: #2C3E50; font-size: 22px; font-weight: 800; text-align: {align_css}; }}
+    .analytics-date {{ color: var(--text-muted, #64748B); font-size: 13px; font-weight: 700; text-align: {align_css}; margin-top: 2px; }}
+    .exec-insight-card {{
+        background: var(--bg-card, #FFFFFF); border: 1px solid #E6D9A8; border-{ 'right' if is_rtl else 'left' }: 4px solid #E8B423;
+        border-radius: 12px; padding: 16px 18px; min-height: 170px; text-align: {align_css}; direction: {page_dir};
+        box-shadow: 0 4px 14px rgba(44,62,80,0.06);
+    }}
+    .exec-insight-kicker {{ font-size: 11px; font-weight: 800; color: #C9A227; margin-bottom: 6px; letter-spacing: 0.04em; }}
+    .exec-insight-title {{ font-size: 15px; font-weight: 800; color: var(--text-title, #2C3E50); margin-bottom: 8px; }}
+    .exec-insight-body {{ font-size: 13px; line-height: 1.7; color: var(--text-body, #334155); }}
+    .exec-insight-action {{
+        margin-top: 12px; padding: 10px 12px; background: #F7F4EC; border-radius: 8px;
+        font-size: 12.5px; line-height: 1.65; color: #2C3E50;
+    }}
+    .audit-table {{ width: 100%; border-collapse: collapse; direction: {page_dir}; text-align: {align_css}; }}
+    .audit-table th {{
+        background: #2C3E50; color: #FFFFFF; padding: 10px 12px; font-size: 13px; font-weight: 800;
+        text-align: {align_css}; border-bottom: 2px solid #E8B423;
+    }}
+    .audit-table td {{
+        padding: 9px 12px; border-bottom: 1px solid #E6D9A8; font-size: 12.5px; text-align: {align_css};
+        background: var(--bg-card, #FFFFFF); color: var(--text-body, #334155);
+    }}
+    .audit-table tr:nth-child(even) td {{ background: #FBF9F3; }}
+    .audit-wrap {{
+        background: var(--bg-card, #FFFFFF); border: 1px solid #E6D9A8; border-radius: 12px;
+        overflow: hidden; box-shadow: 0 4px 12px rgba(44,62,80,0.05);
+    }}
+    .print-only-header {{ display: none !important; }}
+    @media print {{
+        @page {{ size: A3 landscape; margin: 10mm 12mm; }}
+        html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"], .main, .block-container {{
+            background: #FFFFFF !important; color: #2C3E50 !important;
+            overflow: visible !important; height: auto !important; max-width: 100% !important;
+            padding: 0 !important; margin: 0 !important;
+        }}
+        header[data-testid="stHeader"],
+        [data-testid="stToolbar"],
+        [data-testid="stDecoration"],
+        [data-testid="stSidebar"],
+        [data-testid="stSidebarCollapsedControl"],
+        [data-testid="collapsedControl"],
+        [data-testid="stStatusWidget"],
+        [data-testid="stBottomBlockContainer"],
+        footer, #MainMenu, .stDeployButton, .stAppToolbar,
+        .no-print, .footer-container, .analytics-toolbar,
+        [data-testid="stExpander"],
+        [data-testid="stSelectbox"],
+        [data-testid="stIFrame"],
+        [data-testid="stInfo"],
+        [data-testid="stAlert"],
+        [data-testid="stDivider"],
+        .stButton, [data-testid="stButton"],
+        .audit-section, .audit-wrap, .audit-table {{
+            display: none !important; visibility: hidden !important; height: 0 !important; width: 0 !important;
+            overflow: hidden !important; page-break-after: avoid !important;
+        }}
+        body * {{ visibility: hidden !important; }}
+        .print-report, .print-report *,
+        .print-only-header, .print-only-header *,
+        .kpi-container, .kpi-container *, .kpi-card, .kpi-card *,
+        .print-chart-block, .print-chart-block *,
+        .print-keep, .print-keep *,
+        .exec-insight-card, .exec-insight-card *,
+        [data-testid="stPlotlyChart"], [data-testid="stPlotlyChart"] *,
+        .js-plotly-plot, .js-plotly-plot *, .plot-container, .plot-container *, .svg-container, .svg-container * {{
+            visibility: visible !important;
+        }}
+        .audit-section, .audit-section *, .audit-wrap, .audit-wrap *, .audit-table, .audit-table * {{
+            display: none !important; visibility: hidden !important;
+        }}
+        [data-testid="stAppViewContainer"] {{ margin-left: 0 !important; }}
+        section[data-testid="stSidebar"] {{ display: none !important; width: 0 !important; min-width: 0 !important; }}
+        .print-only-header {{ display: block !important; margin-bottom: 10px !important; border-bottom: 3px solid #E8B423; padding-bottom: 8px; page-break-after: avoid !important; }}
+        .analytics-wrap {{ direction: {page_dir} !important; text-align: {align_css} !important; }}
+        .kpi-card {{
+            background: #E3F4FB !important; border: 1px solid #B7D7EA !important;
+            page-break-inside: avoid !important; break-inside: avoid !important;
+        }}
+        .kpi-container, .print-chart-block, .exec-insight-card,
+        .js-plotly-plot, .plot-container, .svg-container,
+        [data-testid="stPlotlyChart"], [data-testid="stHorizontalBlock"] {{
+            page-break-inside: avoid !important; break-inside: avoid-page !important;
+            overflow: visible !important;
+        }}
+        [data-testid="stPlotlyChart"], .js-plotly-plot, .plot-container, .svg-container {{
+            max-height: none !important; height: auto !important;
+        }}
+        .exec-insight-card {{ min-height: auto !important; padding: 10px 12px !important; box-shadow: none !important; }}
+        h2, h3, h4 {{ margin: 4px 0 6px 0 !important; page-break-after: avoid !important; }}
+        * {{ -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }}
+    }}
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown('<div class="analytics-wrap">', unsafe_allow_html=True)
+    st.markdown(f"""
+    <div class="analytics-toolbar">
+        <h2 class="analytics-title">{t["analytics_title"]}</h2>
+        <div class="analytics-date">{t["issue_date"]}: {issue_date_val}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col_scope, col_print = st.columns([2.4, 1.1])
+    with col_scope:
+        scope_labels = [t["analytics_all"]] + analytics_projects
+        current_label = t["analytics_all"] if st.session_state.analytics_scope == "__all__" else st.session_state.analytics_scope
+        if current_label not in scope_labels:
+            current_label = t["analytics_all"]
+        picked_scope = st.selectbox(t["analytics_scope"], scope_labels, index=scope_labels.index(current_label))
+        st.session_state.analytics_scope = "__all__" if picked_scope == t["analytics_all"] else picked_scope
+    with col_print:
+        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+        st.markdown('<div class="no-print">', unsafe_allow_html=True)
+        st.components.v1.html(f"""
+        <button onclick="window.parent.print()" style="background: linear-gradient(135deg, #2C3E50 0%, #1A2834 100%); color:white; padding:11px 16px; border:1px solid #E8B423; border-radius:10px; cursor:pointer; font-weight:800; font-size:13px; width:100%;">
+            {t['print_report']}
+        </button>
+        """, height=50)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    analytics_label = t["analytics_all"] if st.session_state.analytics_scope == "__all__" else st.session_state.analytics_scope
+    if st.session_state.analytics_scope == "__all__":
+        analytics_invoices = [
+            item for item in st.session_state.invoices_data
+            if (not item.get("delete", False)) and (item.get("project") in analytics_projects)
+        ]
+    else:
+        analytics_invoices = [
+            item for item in st.session_state.invoices_data
+            if (not item.get("delete", False)) and (item.get("project") == st.session_state.analytics_scope)
+        ]
+
+    a_total_in = sum(item.get("amount", 0) or 0 for item in analytics_invoices if item.get("doc_type") == "وارد")
+    a_total_out = sum(item.get("amount", 0) or 0 for item in analytics_invoices if item.get("doc_type") == "منصرف")
+    a_balance = a_total_in - a_total_out
+    a_burn_rate = (a_total_out / a_total_in * 100) if a_total_in > 0 else 0
+
+    st.markdown('<div class="print-report">', unsafe_allow_html=True)
     st.markdown(f"""
     <div class="print-only-header">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div style="display:flex; justify-content:space-between; align-items:center; direction:{page_dir}; text-align:{align_css};">
             <div>
-                <h1 style="margin: 0; color: #0284C7; font-size: 28px; font-weight: 900; letter-spacing: 0.5px;">Un-matt ConTech</h1>
-                <h3 style="margin: 4px 0 0 0; color: #1E293B; font-size: 18px;">Executive Project Financial Dashboard & Performance Review</h3>
+                <h1 style="margin:0; color:#2C3E50; font-size:26px; font-weight:900;">اليسر للهندسة والمقاولات</h1>
+                <h3 style="margin:4px 0 0 0; color:#64748B; font-size:16px;">{t["analytics_title"]}</h3>
             </div>
-            <div style="text-align: left;">
-                <div style="font-size: 16px; font-weight: 800; color: #0F172A;">المشروع: <span style="color: #0284C7;">{selected_proj}</span></div>
-                <div style="font-size: 13px; color: #64748B; margin-top: 4px;">تاريخ الإصدار: {datetime.date.today().strftime('%Y-%m-%d')}</div>
+            <div>
+                <div style="font-size:15px; font-weight:800; color:#2C3E50;">{analytics_label}</div>
+                <div style="font-size:13px; color:#64748B; margin-top:4px;">{t["issue_date"]}: {issue_date_val}</div>
             </div>
         </div>
     </div>
     """, unsafe_allow_html=True)
 
-    col_rep_t, col_rep_btn = st.columns([3, 1.2])
-    with col_rep_t:
-        st.markdown(f"<h2 style='color: var(--brand-primary); margin: 0;'>{t['analytics_title']} - <span style='color: var(--text-title);'>{selected_proj}</span></h2>", unsafe_allow_html=True)
-    with col_rep_btn:
-        st.markdown('<div class="no-print">', unsafe_allow_html=True)
-        st.components.v1.html(f"""
-        <button onclick="window.parent.print()" style="background: linear-gradient(135deg, #0284C7 0%, #0369A1 100%); color:white; padding:10px 18px; border:none; border-radius:8px; cursor:pointer; font-weight:bold; font-size:13px; width:100%; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
-            {t['print_report']}
-        </button>
-        """, height=45)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    st.write("<br>", unsafe_allow_html=True)
-
     st.markdown(f"""
-    <div class="kpi-container" style='display: flex; gap: 15px; margin-bottom: 20px;'>
-        <div style='flex: 1; background: var(--kpi-inflow-bg); border-top: 4px solid var(--kpi-inflow-border); padding: 14px; border-radius: 8px; text-align: center;'><h4 style='color: var(--kpi-inflow-text); margin: 0; font-size: 15px;'>{t["metric_in"]}</h4><h2 style='color: var(--kpi-inflow-text); margin: 6px 0 0 0; font-size: 22px;'>{total_in:,.2f} {t["curr"]}</h2></div>
-        <div style='flex: 1; background: var(--kpi-outflow-bg); border-top: 4px solid var(--kpi-outflow-border); padding: 14px; border-radius: 8px; text-align: center;'><h4 style='color: var(--kpi-outflow-text); margin: 0; font-size: 15px;'>{t["metric_out"]}</h4><h2 style='color: var(--kpi-outflow-text); margin: 6px 0 0 0; font-size: 22px;'>{total_out:,.2f} {t["curr"]}</h2></div>
-        <div style='flex: 1; background: var(--kpi-balance-bg); border-top: 4px solid var(--kpi-balance-border); padding: 14px; border-radius: 8px; text-align: center;'><h4 style='color: var(--kpi-balance-text); margin: 0; font-size: 15px;'>{t["metric_bal"]}</h4><h2 style='color: var(--kpi-balance-text); margin: 6px 0 0 0; font-size: 22px;'>{balance:,.2f} {t["curr"]}</h2></div>
-        <div style='flex: 1; background: var(--kpi-rate-bg); border-top: 4px solid var(--kpi-rate-border); padding: 14px; border-radius: 8px; text-align: center;'><h4 style='color: var(--kpi-rate-text); margin: 0; font-size: 15px;'>{t["metric_burn"]}</h4><h2 style='color: var(--kpi-rate-text); margin: 6px 0 0 0; font-size: 22px;'>{burn_rate:.1f}%</h2></div>
+    <div class="kpi-container" style='display: flex; gap: 15px; margin: 8px 0 20px 0; direction:{page_dir};'>
+        <div class="kpi-card"><h5>{t["metric_in"]}</h5><h3>{a_total_in:,.2f} {t["curr"]}</h3></div>
+        <div class="kpi-card"><h5>{t["metric_out"]}</h5><h3>{a_total_out:,.2f} {t["curr"]}</h3></div>
+        <div class="kpi-card"><h5>{t["metric_bal"]}</h5><h3>{a_balance:,.2f} {t["curr"]}</h3></div>
+        <div class="kpi-card"><h5>{t["metric_burn"]}</h5><h3>{a_burn_rate:.1f}%</h3></div>
     </div>
     """, unsafe_allow_html=True)
 
-    if total_out > 0 or total_in > 0:
-        df_all = pd.DataFrame(active_project_invoices)
-        df_out = df_all[df_all["doc_type"] == "منصرف"] if not df_all.empty else pd.DataFrame()
-        
+    if a_total_out > 0 or a_total_in > 0:
+        df_all = pd.DataFrame(analytics_invoices)
+        df_out = df_all[df_all["doc_type"] == "منصرف"] if not df_all.empty and "doc_type" in df_all.columns else pd.DataFrame()
+        chart_legend = dict(x=1, xanchor="right") if is_rtl else dict(x=0, xanchor="left")
+
         col_chart1, col_chart2 = st.columns(2)
         with col_chart1:
-            st.markdown(f"### {t['chart_cat']}")
+            st.markdown(f"<div class='print-chart-block'><h3 style='text-align:{align_css};'>{t['chart_cat']}</h3></div>", unsafe_allow_html=True)
             if not df_out.empty:
                 cat_sum = df_out.groupby("category")["amount"].sum().reset_index()
                 fig_pie = px.pie(cat_sum, values='amount', names='category', hole=0.45, color_discrete_sequence=px.colors.qualitative.Bold)
-                fig_pie.update_layout(height=280, margin=dict(t=10, b=10, l=10, r=10), paper_bgcolor='rgba(0,0,0,0)', font=dict(size=12, color="#1E293B" if st.session_state.system_theme == "Light" else "#F8FAFC"))
+                fig_pie.update_layout(height=320, margin=dict(t=10, b=10, l=10, r=10), paper_bgcolor='rgba(0,0,0,0)', font=dict(size=12, color=chart_font), legend=chart_legend)
                 st.plotly_chart(fig_pie, use_container_width=True, config={'displayModeBar': False})
-        
+
         with col_chart2:
-            st.markdown(f"### {t['chart_pay']}")
+            st.markdown(f"<div class='print-chart-block'><h3 style='text-align:{align_css};'>{t['chart_pay']}</h3></div>", unsafe_allow_html=True)
             if not df_out.empty:
                 pay_sum = df_out.groupby("payment_method")["amount"].sum().reset_index()
                 fig_bar = px.bar(pay_sum, x='payment_method', y='amount', color='payment_method', text='amount', color_discrete_sequence=px.colors.qualitative.Safe)
                 fig_bar.update_traces(texttemplate='%{text:,.0f}', textposition='outside')
-                fig_bar.update_layout(height=280, margin=dict(t=10, b=10, l=10, r=10), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=False, font=dict(size=11, color="#1E293B" if st.session_state.system_theme == "Light" else "#F8FAFC"))
+                fig_bar.update_layout(height=320, margin=dict(t=10, b=40, l=10, r=10), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=False, font=dict(size=11, color=chart_font))
+                if is_rtl:
+                    fig_bar.update_xaxes(autorange="reversed", title_text="")
+                    fig_bar.update_yaxes(side="right", title_text="")
+                else:
+                    fig_bar.update_xaxes(title_text="")
+                    fig_bar.update_yaxes(title_text="")
                 st.plotly_chart(fig_bar, use_container_width=True, config={'displayModeBar': False})
 
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown("### 💡 التحليل المالي والتوصيات التنفيذية (Actionable Insights & EDA)")
-        top_cat = "غير محدد"
+        trend_df = df_all.copy()
+        if "invoice_date" in trend_df.columns:
+            trend_df["invoice_date"] = pd.to_datetime(trend_df["invoice_date"], errors="coerce")
+            trend_df = trend_df.dropna(subset=["invoice_date"])
+        else:
+            trend_df = pd.DataFrame()
+        if not trend_df.empty and "amount" in trend_df.columns:
+            trend_df["month"] = trend_df["invoice_date"].dt.to_period("M").dt.to_timestamp()
+            monthly = trend_df.groupby(["month", "doc_type"], dropna=False)["amount"].sum().reset_index()
+            pivot = monthly.pivot_table(index="month", columns="doc_type", values="amount", aggfunc="sum").fillna(0)
+            if "وارد" not in pivot.columns:
+                pivot["وارد"] = 0
+            if "منصرف" not in pivot.columns:
+                pivot["منصرف"] = 0
+            pivot = pivot.sort_index()
+            fig_trend = go.Figure()
+            fig_trend.add_trace(go.Scatter(
+                x=pivot.index, y=pivot["وارد"], name=t["trend_in"],
+                mode="lines+markers", line=dict(color="#10B981", width=3), marker=dict(size=7)
+            ))
+            fig_trend.add_trace(go.Scatter(
+                x=pivot.index, y=pivot["منصرف"], name=t["trend_out"],
+                mode="lines+markers", line=dict(color="#EF4444", width=3), marker=dict(size=7)
+            ))
+            fig_trend.update_layout(
+                height=280, margin=dict(t=16, b=16, l=16, r=16),
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(size=12, color=chart_font),
+                legend=dict(orientation="h", y=1.12, x=1 if is_rtl else 0, xanchor="right" if is_rtl else "left"),
+                hovermode="x unified",
+                xaxis=dict(title="", showgrid=True, gridcolor="rgba(44,62,80,0.08)", tickformat="%Y-%m"),
+                yaxis=dict(title="", showgrid=True, gridcolor="rgba(44,62,80,0.08)", side="right" if is_rtl else "left", tickformat=",.0f")
+            )
+            st.markdown(f"<div class='print-chart-block'><h3 style='text-align:{align_css};'>{t['chart_trend']}</h3></div>", unsafe_allow_html=True)
+            st.plotly_chart(fig_trend, use_container_width=True, config={"displayModeBar": False})
+
+        top_cat = "غير محدد" if is_rtl else "Unspecified"
         top_cat_amt = 0.0
         top_cat_pct = 0.0
         if not df_out.empty:
@@ -1363,50 +2304,85 @@ elif st.session_state.active_tab == "analytics":
             if not cat_grouped.empty:
                 top_cat = cat_grouped.index[0]
                 top_cat_amt = cat_grouped.iloc[0]
-                top_cat_pct = (top_cat_amt / total_out * 100) if total_out > 0 else 0
+                top_cat_pct = (top_cat_amt / a_total_out * 100) if a_total_out > 0 else 0
 
         cash_amt = df_out[df_out["payment_method"] == "نقدي"]["amount"].sum() if not df_out.empty else 0
-        cash_pct = (cash_amt / total_out * 100) if total_out > 0 else 0
+        cash_pct = (cash_amt / a_total_out * 100) if a_total_out > 0 else 0
 
+        if is_rtl:
+            cost_body = f"يمثل بند <b>({top_cat})</b> أعلى معدل استنزاف نقدي في نطاق التحليل بإجمالي <b>{top_cat_amt:,.2f} {t['curr']}</b> وبنسبة <b>{top_cat_pct:.1f}%</b> من إجمالي المنصرف."
+            cost_rec = "مراجعة أوامر التوريد ومطابقة المستخلصات الدورية للبند للتحقق من كفاءة التسعير والكميات."
+            cash_body = f"تبلغ نسبة السداد النقدي المباشر <b>{cash_pct:.1f}%</b> بإجمالي <b>{cash_amt:,.2f} {t['curr']}</b>."
+            cash_rec = "الاعتماد المستمر على الشيكات والتحويلات البنكية الموثقة لإحكام الرقابة وتأكيد التسليم المباشر للموردين والمقاولين."
+        else:
+            cost_body = f"The item <b>({top_cat})</b> is the highest cash drain in this scope, totaling <b>{top_cat_amt:,.2f} {t['curr']}</b> ({top_cat_pct:.1f}% of expenses)."
+            cost_rec = "Review supply orders and periodic certificates for this item to verify pricing and quantity efficiency."
+            cash_body = f"Direct cash payments represent <b>{cash_pct:.1f}%</b>, totaling <b>{cash_amt:,.2f} {t['curr']}</b>."
+            cash_rec = "Continue using documented cheques and bank transfers to tighten control and confirm direct settlement with vendors."
+
+        st.markdown(f"<h3 class='print-keep' style='text-align:{align_css}; margin-top:12px;'>{t['insights_title']}</h3>", unsafe_allow_html=True)
         ins_col1, ins_col2 = st.columns(2)
         with ins_col1:
             st.markdown(f"""
-            <div class="insight-card">
-                <div style="font-weight: 800; font-size: 14px; color: #0284C7; margin-bottom: 4px;">🎯 تركز السيولة وأكبر بنود التكلفة:</div>
-                <div style="font-size: 12.5px; line-height: 1.5;">
-                    يمثل بند <b>({top_cat})</b> أعلى معدل استنزاف نقدي في المشروع بإجمالي <b>{top_cat_amt:,.2f} {t['curr']}</b> وبنسبة <b>{top_cat_pct:.1f}%</b> من إجمالي المنصرف.<br>
-                    <b>التوصية:</b> مراجعة أوامر التوريد ومطابقة المستخلصات الدورية للبند للتحقق من كفاءة التسعير والكميات.
-                </div>
+            <div class="exec-insight-card">
+                <div class="exec-insight-kicker">{t["insight_kicker"]}</div>
+                <div class="exec-insight-title">🎯 {t["insight_cost_title"]}</div>
+                <div class="exec-insight-body">{cost_body}</div>
+                <div class="exec-insight-action"><b>{t["insight_rec_label"]}:</b> {cost_rec}</div>
             </div>
             """, unsafe_allow_html=True)
         with ins_col2:
             st.markdown(f"""
-            <div class="insight-card">
-                <div style="font-weight: 800; font-size: 14px; color: #0284C7; margin-bottom: 4px;">⚡ كفاءة السيولة ومخاطر السداد:</div>
-                <div style="font-size: 12.5px; line-height: 1.5;">
-                    تبلغ نسبة السداد النقدي المباشر <b>{cash_pct:.1f}%</b> بإجمالي <b>{cash_amt:,.2f} {t['curr']}</b>.<br>
-                    <b>التوصية:</b> الاعتماد المستمر على الشيكات والتحويلات البنكية الموثقة لإحكام الرقابة وتأكيد التسليم المباشر للموردين والمقاولين.
-                </div>
+            <div class="exec-insight-card">
+                <div class="exec-insight-kicker">{t["insight_kicker"]}</div>
+                <div class="exec-insight-title">⚡ {t["insight_cash_title"]}</div>
+                <div class="exec-insight-body">{cash_body}</div>
+                <div class="exec-insight-action"><b>{t["insight_rec_label"]}:</b> {cash_rec}</div>
             </div>
             """, unsafe_allow_html=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)
 
     if is_company_admin or is_ceo or is_super_admin:
         st.markdown('<div class="audit-section no-print">', unsafe_allow_html=True)
         st.divider()
-        st.markdown(f"### {t['audit_title']}")
+        st.markdown(f"<h3 style='text-align:{align_css};'>{t['audit_title']}</h3>", unsafe_allow_html=True)
         audit_logs = load_audit_log()
         if audit_logs:
-            audit_df = pd.DataFrame(audit_logs)
-            audit_df.rename(columns={"timestamp": "Timestamp", "user_name": "User", "action": "Action", "details": "Details"}, inplace=True)
-            st.dataframe(audit_df[["Timestamp", "User", "Action", "Details"]], use_container_width=True, hide_index=True)
+            rows_html = []
+            for log in audit_logs:
+                ts = str(log.get("timestamp", "")).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                user = str(log.get("user_name", "")).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                action = str(log.get("action", "")).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                details = str(log.get("details", "")).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                rows_html.append(f"<tr><td>{ts}</td><td>{user}</td><td>{action}</td><td>{details}</td></tr>")
+            st.markdown(f"""
+            <div class="audit-wrap">
+                <table class="audit-table">
+                    <thead>
+                        <tr>
+                            <th>{t["audit_col_time"]}</th>
+                            <th>{t["audit_col_user"]}</th>
+                            <th>{t["audit_col_action"]}</th>
+                            <th>{t["audit_col_details"]}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {''.join(rows_html)}
+                    </tbody>
+                </table>
+            </div>
+            """, unsafe_allow_html=True)
         else:
-            st.info("No audit logs yet.")
+            st.info(t["no_audit"])
         st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # ═════════════════════════════════════════════════════════════════════════
 # ─── تبويب سياسات وضوابط النظام المحدث (In-App Tuning & Prompt Controls) ───
 # ═════════════════════════════════════════════════════════════════════════
-elif st.session_state.active_tab == "memory" and (is_company_admin or is_super_admin):
+elif st.session_state.active_tab == "memory" and can_access_system_policies:
     if not st.session_state.memory_unlocked:
         st.warning("🔒 التحقق الإداري مطلوب للدخول إلى مركز التحكم بالسياسات.")
         passcode = st.text_input("رمز الأمان الإداري:", type="password")
@@ -1417,7 +2393,7 @@ elif st.session_state.active_tab == "memory" and (is_company_admin or is_super_a
             else: st.error("رمز الأمان غير صحيح!")
     else:
         st.markdown(f"""
-        <div style="background-color: var(--table-header-bg); color: white; padding: 12px 25px; border-radius: 8px; font-size: 20px; font-weight: bold; margin-bottom: 20px; border-right: 6px solid var(--brand-primary);">
+        <div class="section-banner">
             {t['tab_memory']}
         </div>
         """, unsafe_allow_html=True)
@@ -1575,8 +2551,22 @@ elif st.session_state.active_tab == "memory" and (is_company_admin or is_super_a
                         st.rerun()
 
 # ─── الفوتر ───
-st.markdown("""
+st.markdown(f"""
+<style>
+.footer-container {{
+    margin-top: 18px;
+    padding: 8px 4px 14px 4px;
+    text-align: left !important;
+    direction: ltr !important;
+}}
+.brand-footer-text {{
+    display: inline-block;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text-muted, #64748B);
+}}
+</style>
 <div class="footer-container no-print">
-    <span class="brand-footer-text">Un-matt ConTech 2026</span>
+    <span class="brand-footer-text">{t["footer_brand"]}</span>
 </div>
 """, unsafe_allow_html=True)
