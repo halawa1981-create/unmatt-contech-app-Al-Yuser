@@ -1,14 +1,17 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" dir="ltr">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Anmatt Contech — Login | Invoice Smart System</title>
+  <title>Anmatt Contech — Login | Project Financial Control</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
       background: #080D1A;
       color: #F8FAFC;
       min-height: 100vh;
@@ -17,6 +20,12 @@
       align-items: center;
       justify-content: center;
       overflow-x: hidden;
+      font-feature-settings: "ss01", "cv11";
+      -webkit-font-smoothing: antialiased;
+    }
+
+    html[dir="rtl"] body {
+      font-family: 'IBM Plex Sans Arabic', Inter, sans-serif;
     }
 
     /* الشريط العلوي */
@@ -30,14 +39,63 @@
       font-size: 13px;
       margin-bottom: 16px;
       padding: 0 8px;
+      gap: 16px;
+    }
+    .top-bar-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
     }
     .top-badge {
       background: #1E293B;
       color: #38BDF8;
       padding: 4px 10px;
       border-radius: 6px;
-      font-weight: 800;
-      font-size: 11.5px;
+      font-weight: 700;
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .top-experience {
+      color: #94A3B8;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      white-space: nowrap;
+    }
+
+    .lang-switch {
+      display: inline-flex;
+      align-items: center;
+      background: #0F172A;
+      border: 1px solid rgba(56, 189, 248, 0.28);
+      border-radius: 999px;
+      padding: 3px;
+      flex-shrink: 0;
+    }
+    .lang-btn {
+      border: none;
+      background: transparent;
+      color: #94A3B8;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      padding: 6px 12px;
+      border-radius: 999px;
+      cursor: pointer;
+      font-family: inherit;
+      transition: all 0.18s ease;
+    }
+    .lang-btn.is-active {
+      background: linear-gradient(135deg, #0EA5E9 0%, #0284C7 100%);
+      color: #FFFFFF;
+      box-shadow: 0 4px 12px -2px rgba(14, 165, 233, 0.45);
+    }
+
+    html[dir="rtl"] .top-badge {
+      letter-spacing: 0.02em;
+      text-transform: none;
     }
 
     /* الحاوية المتجاوبة بمقاس Full HD 1920x1080 */
@@ -46,6 +104,7 @@
       max-width: 1560px;
       min-height: 720px;
       display: flex;
+      flex-direction: row;
       border-radius: 24px;
       overflow: hidden;
       border: 1px solid rgba(255, 255, 255, 0.08);
@@ -109,35 +168,43 @@
     .brand-title {
       font-size: 28px;
       font-weight: 800;
-      letter-spacing: -0.02em;
+      letter-spacing: -0.03em;
       color: #FFFFFF;
-      line-height: 1.1;
+      line-height: 1.12;
     }
-    .brand-title span { color: #38BDF8; font-weight: 600; }
+    .brand-title span { color: #38BDF8; font-weight: 600; letter-spacing: -0.02em; }
     .brand-sub {
       font-size: 11.5px;
-      font-weight: 700;
+      font-weight: 600;
       color: #94A3B8;
-      letter-spacing: 0.15em;
+      letter-spacing: 0.14em;
       text-transform: uppercase;
-      margin-top: 4px;
+      margin-top: 6px;
+      line-height: 1.45;
     }
 
     .system-badge {
       display: inline-flex;
-      align-items: center;
-      gap: 8px;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 5px;
       background: rgba(14, 165, 233, 0.12);
       border: 1px solid rgba(56, 189, 248, 0.35);
-      padding: 6px 14px;
+      padding: 9px 16px;
       border-radius: 8px;
+      color: #E0F2FE;
+      margin-bottom: 22px;
+      box-shadow: 0 4px 14px rgba(14, 165, 233, 0.15);
+    }
+    .system-badge-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
       font-size: 12px;
       font-weight: 700;
-      letter-spacing: 0.08em;
+      letter-spacing: 0.1em;
       text-transform: uppercase;
-      color: #E0F2FE;
-      margin-bottom: 20px;
-      box-shadow: 0 4px 14px rgba(14, 165, 233, 0.15);
+      line-height: 1.3;
     }
     .system-badge-dot {
       width: 8px;
@@ -145,21 +212,32 @@
       border-radius: 50%;
       background: #38BDF8;
       box-shadow: 0 0 10px #38BDF8;
+      flex-shrink: 0;
+    }
+    .system-badge-sub {
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.03em;
+      color: #7DD3FC;
+      padding-left: 16px;
+      line-height: 1.4;
     }
 
     .hero-headline {
-      font-size: 42px;
+      font-size: 40px;
       font-weight: 800;
-      line-height: 1.2;
-      letter-spacing: -0.03em;
+      line-height: 1.18;
+      letter-spacing: -0.035em;
       color: #FFFFFF;
-      max-width: 720px;
+      max-width: 740px;
       margin-bottom: 30px;
     }
     .hero-headline .highlight {
       background: linear-gradient(135deg, #FFFFFF 30%, #93C5FD 100%);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
+      font-weight: 800;
+      letter-spacing: -0.03em;
     }
 
     /* شبكة الركائز الثلاث */
@@ -203,20 +281,22 @@
 
     .pillar-tag {
       font-size: 10.5px;
-      font-weight: 800;
+      font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 0.08em;
-      margin-bottom: 4px;
+      letter-spacing: 0.1em;
+      margin-bottom: 6px;
+      line-height: 1.35;
     }
     .p-orange .pillar-tag { color: #FB923C; }
     .p-green .pillar-tag { color: #34D399; }
     .p-cyan .pillar-tag { color: #38BDF8; }
 
     .pillar-title {
-      font-size: 14.5px;
-      font-weight: 800;
+      font-size: 15px;
+      font-weight: 700;
       color: #F8FAFC;
-      line-height: 1.3;
+      line-height: 1.4;
+      letter-spacing: -0.015em;
     }
 
     /* الجانب الأيمن: بطاقة تسجيل الدخول (38%) */
@@ -235,22 +315,27 @@
       font-size: 32px;
       font-weight: 800;
       color: #0F172A;
-      letter-spacing: -0.02em;
-      margin-bottom: 6px;
+      letter-spacing: -0.03em;
+      margin-bottom: 8px;
+      line-height: 1.15;
     }
     .auth-subheading {
       font-size: 15px;
+      font-weight: 500;
       color: #64748B;
       margin-bottom: 34px;
+      letter-spacing: -0.01em;
+      line-height: 1.5;
     }
 
     .form-group { margin-bottom: 22px; }
     .form-label {
       display: block;
-      font-size: 13.5px;
-      font-weight: 700;
+      font-size: 13px;
+      font-weight: 600;
       color: #334155;
       margin-bottom: 8px;
+      letter-spacing: 0.01em;
     }
     .form-input {
       width: 100%;
@@ -259,10 +344,13 @@
       border: 1.5px solid #CBD5E1;
       border-radius: 10px;
       font-size: 15px;
+      font-weight: 500;
+      letter-spacing: -0.01em;
       color: #0F172A;
       background: #F8FAFC;
       outline: none;
       transition: all 0.15s ease;
+      font-family: inherit;
     }
     .form-input:focus {
       border-color: #0284C7;
@@ -277,6 +365,7 @@
       font-size: 13px;
       margin-bottom: 28px;
       color: #475569;
+      letter-spacing: -0.01em;
     }
     .remember-label {
       display: flex;
@@ -289,35 +378,41 @@
       color: #0284C7;
       font-weight: 700;
       text-decoration: none;
+      letter-spacing: -0.01em;
     }
 
     .signin-btn {
       width: 100%;
       height: 52px;
-      background: linear-gradient(135deg, #0284C7 0%, #0369A1 100%);
+      background: linear-gradient(135deg, #0EA5E9 0%, #0284C7 100%);
       border: none;
       border-radius: 10px;
       color: #FFFFFF;
       font-size: 16px;
       font-weight: 800;
+      letter-spacing: 0.01em;
       cursor: pointer;
-      box-shadow: 0 6px 18px -3px rgba(2, 132, 199, 0.45);
+      box-shadow: 0 6px 18px -3px rgba(14, 165, 233, 0.5);
       display: flex;
       align-items: center;
       justify-content: center;
       gap: 10px;
       transition: all 0.2s ease;
+      font-family: inherit;
     }
     .signin-btn:hover {
-      background: linear-gradient(135deg, #0369A1 0%, #075985 100%);
+      background: linear-gradient(135deg, #38BDF8 0%, #0369A1 100%);
       transform: translateY(-2px);
     }
 
     .auth-footer {
       text-align: center;
       font-size: 13.5px;
+      font-weight: 500;
       color: #64748B;
       margin-top: 26px;
+      letter-spacing: -0.01em;
+      line-height: 1.5;
     }
     .auth-footer a {
       color: #0284C7;
@@ -325,16 +420,27 @@
       text-decoration: none;
     }
 
-    .security-badge {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
-      font-size: 12px;
-      color: #94A3B8;
-      font-weight: 600;
-      border-top: 1px solid #F1F5F9;
-      padding-top: 22px;
+    html[dir="rtl"] .brand-sub,
+    html[dir="rtl"] .system-badge-row,
+    html[dir="rtl"] .pillar-tag {
+      letter-spacing: 0.02em;
+      text-transform: none;
+    }
+    html[dir="rtl"] .hero-headline {
+      letter-spacing: -0.01em;
+      line-height: 1.35;
+    }
+    html[dir="rtl"] .system-badge-sub {
+      padding-left: 0;
+      padding-right: 16px;
+    }
+    html[dir="rtl"] .form-input {
+      direction: ltr;
+      text-align: left;
+      font-family: Inter, sans-serif;
+    }
+    html[dir="rtl"] .signin-btn svg {
+      transform: scaleX(-1);
     }
   </style>
 </head>
@@ -342,11 +448,14 @@
 
   <!-- شريط الترويسة العلوي -->
   <div class="top-bar">
-    <div style="display: flex; align-items: center; gap: 10px;">
-      <span class="top-badge">CONTECH VISUAL IDENTITY</span>
-      <span style="color: #94A3B8; font-weight: 700;">Anmatt Contech — Unified Login Experience</span>
+    <div class="top-bar-left">
+      <span class="top-badge" data-i18n="top_badge">CONTECH VISUAL IDENTITY</span>
+      <span class="top-experience" data-i18n="top_experience">Anmatt Contech — Unified Login Experience</span>
     </div>
-    <div style="font-weight: 600;">Target: Enterprise SaaS & Field Web (1920x1080)</div>
+    <div class="lang-switch" role="group" aria-label="Language">
+      <button type="button" class="lang-btn is-active" data-lang="en" id="lang-en">EN</button>
+      <button type="button" class="lang-btn" data-lang="ar" id="lang-ar">عربي</button>
+    </div>
   </div>
 
   <div class="login-container">
@@ -388,18 +497,21 @@
 
           <div class="brand-names">
             <div class="brand-title">Anmatt <span>Contech</span></div>
-            <div class="brand-sub">AI Solutions &bull; Construction Technology</div>
+            <div class="brand-sub" data-i18n="brand_sub">AI Solutions &bull; Construction Technology</div>
           </div>
         </div>
 
         <div class="system-badge">
-          <span class="system-badge-dot"></span>
-          Invoice Smart System
+          <div class="system-badge-row">
+            <span class="system-badge-dot"></span>
+            <span data-i18n="product_label">PROJECT FINANCIAL CONTROL</span>
+          </div>
+          <div class="system-badge-sub" data-i18n="product_sub">Invoice Management &amp; Reconciliation</div>
         </div>
 
         <h1 class="hero-headline">
-          Turn invoices into<br>
-          <span class="highlight">controlled project data</span>
+          <span data-i18n="hero_lead">Turn Project Transactions into</span><br>
+          <span class="highlight" data-i18n="hero_highlight">Controlled Financial Intelligence</span>
         </h1>
       </div>
 
@@ -417,8 +529,8 @@
             </svg>
           </div>
           <div>
-            <div class="pillar-tag">EXTRACTION ENGINE</div>
-            <div class="pillar-title">AI Invoice Processing</div>
+            <div class="pillar-tag" data-i18n="pillar1_tag">EXTRACTION ENGINE</div>
+            <div class="pillar-title" data-i18n="pillar1_title">AI Invoice Processing</div>
           </div>
         </div>
 
@@ -434,8 +546,8 @@
             </svg>
           </div>
           <div>
-            <div class="pillar-tag">SMART CLASSIFICATION</div>
-            <div class="pillar-title">Automated Cost Coding</div>
+            <div class="pillar-tag" data-i18n="pillar2_tag">SMART CLASSIFICATION</div>
+            <div class="pillar-title" data-i18n="pillar2_title">Automated Cost Coding</div>
           </div>
         </div>
 
@@ -450,8 +562,8 @@
             </svg>
           </div>
           <div>
-            <div class="pillar-tag">EXPENDITURE ANALYSIS</div>
-            <div class="pillar-title">Real-Time Insights</div>
+            <div class="pillar-tag" data-i18n="pillar3_tag">EXPENDITURE ANALYSIS</div>
+            <div class="pillar-title" data-i18n="pillar3_title">Real-Time Insights</div>
           </div>
         </div>
       </div>
@@ -460,30 +572,30 @@
     <!-- الجانب الأيمن: كارت تسجيل الدخول الأبيض النظيف -->
     <div class="auth-panel">
       <div>
-        <div class="auth-heading">Welcome back</div>
-        <div class="auth-subheading">Sign in to your Anmatt workspace</div>
+        <div class="auth-heading" data-i18n="welcome">Welcome back</div>
+        <div class="auth-subheading" data-i18n="welcome_sub">Sign in to your Anmatt workspace</div>
 
         <form onsubmit="handleLogin(event)">
           <div class="form-group">
-            <label class="form-label" for="email">Email</label>
+            <label class="form-label" for="email" data-i18n="email">Email</label>
             <input type="email" id="email" class="form-input" value="halawa1981@gmail.com" required>
           </div>
 
           <div class="form-group">
-            <label class="form-label" for="password">Password</label>
+            <label class="form-label" for="password" data-i18n="password">Password</label>
             <input type="password" id="password" class="form-input" placeholder="••••••••••••" required>
           </div>
 
           <div class="form-options">
             <label class="remember-label">
               <input type="checkbox" checked style="accent-color: #0284C7; width: 16px; height: 16px;">
-              <span>Remember me</span>
+              <span data-i18n="remember">Remember me</span>
             </label>
-            <a href="#" class="forgot-link">Forgot password?</a>
+            <a href="#" class="forgot-link" data-i18n="forgot">Forgot password?</a>
           </div>
 
           <button type="submit" class="signin-btn">
-            <span>Sign in</span>
+            <span data-i18n="signin">Sign in</span>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
               <line x1="5" y1="12" x2="19" y2="12"></line>
               <polyline points="12 5 19 12 12 19"></polyline>
@@ -492,22 +604,92 @@
         </form>
 
         <div class="auth-footer">
-          Don't have an account? <a href="#">Request access</a>
+          <span data-i18n="no_account">Don't have an account?</span>
+          <a href="#" data-i18n="request_access">Request access</a>
         </div>
-      </div>
-
-      <div class="security-badge">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
-          <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
-        </svg>
-        <span>Enterprise Grade &bull; 256-bit SSL Security Protocol</span>
       </div>
     </div>
 
   </div>
 
   <script>
+    const I18N = {
+      en: {
+        top_badge: "CONTECH VISUAL IDENTITY",
+        top_experience: "Anmatt Contech — Unified Login Experience",
+        brand_sub: "AI Solutions • Construction Technology",
+        product_label: "PROJECT FINANCIAL CONTROL",
+        product_sub: "Invoice Management & Reconciliation",
+        hero_lead: "Turn Project Transactions into",
+        hero_highlight: "Controlled Financial Intelligence",
+        pillar1_tag: "EXTRACTION ENGINE",
+        pillar1_title: "AI Invoice Processing",
+        pillar2_tag: "SMART CLASSIFICATION",
+        pillar2_title: "Automated Cost Coding",
+        pillar3_tag: "EXPENDITURE ANALYSIS",
+        pillar3_title: "Real-Time Insights",
+        welcome: "Welcome back",
+        welcome_sub: "Sign in to your Anmatt workspace",
+        email: "Email",
+        password: "Password",
+        remember: "Remember me",
+        forgot: "Forgot password?",
+        signin: "Sign in",
+        no_account: "Don't have an account?",
+        request_access: "Request access"
+      },
+      ar: {
+        top_badge: "هوية كونتك البصرية",
+        top_experience: "أنمات كونتك — تجربة دخول موحّدة",
+        brand_sub: "حلول الذكاء الاصطناعي • تقنيات الإنشاء",
+        product_label: "الرقابة المالية للمشاريع",
+        product_sub: "إدارة الفواتير والمطابقة المالية",
+        hero_lead: "حوّل معاملات المشروع إلى",
+        hero_highlight: "ذكاء مالي منضبط",
+        pillar1_tag: "محرك الاستخراج",
+        pillar1_title: "معالجة الفواتير بالذكاء الاصطناعي",
+        pillar2_tag: "التصنيف الذكي",
+        pillar2_title: "ترميز التكاليف الآلي",
+        pillar3_tag: "تحليل المصروفات",
+        pillar3_title: "رؤى لحظية",
+        welcome: "مرحباً بعودتك",
+        welcome_sub: "سجّل الدخول إلى مساحة عمل أنمات",
+        email: "البريد الإلكتروني",
+        password: "كلمة المرور",
+        remember: "تذكرني",
+        forgot: "نسيت كلمة المرور؟",
+        signin: "تسجيل الدخول",
+        no_account: "ليس لديك حساب؟",
+        request_access: "اطلب صلاحية الدخول"
+      }
+    };
+
+    function setLoginLanguage(lang) {
+      const pack = I18N[lang] || I18N.en;
+      document.documentElement.lang = lang === "ar" ? "ar" : "en";
+      document.documentElement.dir = lang === "ar" ? "rtl" : "ltr";
+      document.querySelectorAll("[data-i18n]").forEach(function (el) {
+        const key = el.getAttribute("data-i18n");
+        if (pack[key]) el.textContent = pack[key];
+      });
+      document.querySelectorAll(".lang-btn").forEach(function (btn) {
+        btn.classList.toggle("is-active", btn.getAttribute("data-lang") === lang);
+      });
+      try { localStorage.setItem("login_lang", lang); } catch (e) {}
+    }
+
+    document.querySelectorAll(".lang-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        setLoginLanguage(btn.getAttribute("data-lang"));
+      });
+    });
+
+    (function initLang() {
+      var saved = "en";
+      try { saved = localStorage.getItem("login_lang") || "en"; } catch (e) {}
+      setLoginLanguage(saved === "ar" ? "ar" : "en");
+    })();
+
     function handleLogin(e) {
       e.preventDefault();
       const em = document.getElementById('email').value.trim();

@@ -855,6 +855,7 @@ if "show_change_pwd_modal" not in st.session_state: st.session_state.show_change
 if "logged_in" not in st.session_state: st.session_state.logged_in = (st.query_params.get("session_auth") == "auth_valid_session")
 if "current_user" not in st.session_state: st.session_state.current_user = None
 if "upload_doc_kind" not in st.session_state: st.session_state.upload_doc_kind = "out"
+if "login_lang" not in st.session_state: st.session_state.login_lang = "en"
 
 api_key = ""
 try:
@@ -875,9 +876,51 @@ if not api_key:
 # ─── بوابة تسجيل الدخول ───
 # ═════════════════════════════════════════════════════════════════════════
 if not st.session_state.logged_in:
+    _ll = st.session_state.login_lang
+    _L = {
+        "en": {
+            "top_badge": "CONTECH VISUAL IDENTITY",
+            "top_experience": "Un-matt ConTech — Unified Login Experience",
+            "brand_sub": "Enterprise Solutions • Construction Technology",
+            "product_label": "PROJECT FINANCIAL CONTROL",
+            "product_sub": "Invoice Management & Reconciliation",
+            "hero_lead": "Turn Project Transactions into",
+            "hero_highlight": "Controlled Financial Intelligence",
+            "p1_tag": "EXTRACTION ENGINE", "p1_title": "Smart Data Extraction",
+            "p1_desc": "Automated OCR parsing & dual textual verification.",
+            "p2_tag": "AUTO COST CODING", "p2_title": "Self Aggregation & Classification",
+            "p2_desc": "Dynamic vendor mapping into controlled BOQ ledger.",
+            "p3_tag": "EXECUTIVE INTELLIGENCE", "p3_title": "Expenses Analysis & Actionable Insights",
+            "p3_desc": "Board-ready A3 KPIs, burn rate, and cost control.",
+            "welcome": "Welcome back", "welcome_sub": "Sign in to your Un-matt workspace",
+            "email": "Email Address", "password": "Password",
+            "remember": "Remember me", "forgot": "Forgot password?",
+            "signin": "Sign in →", "err": "Invalid email or password.",
+        },
+        "ar": {
+            "top_badge": "هوية كونتك البصرية",
+            "top_experience": "أنمات كونتك — تجربة دخول موحّدة",
+            "brand_sub": "حلول المؤسسات • تقنيات الإنشاء",
+            "product_label": "الرقابة المالية للمشاريع",
+            "product_sub": "إدارة الفواتير والمطابقة المالية",
+            "hero_lead": "حوّل معاملات المشروع إلى",
+            "hero_highlight": "ذكاء مالي منضبط",
+            "p1_tag": "محرك الاستخراج", "p1_title": "استخراج البيانات الذكي",
+            "p1_desc": "تحليل ضوئي آلي وتحقق نصي مزدوج.",
+            "p2_tag": "ترميز التكاليف الآلي", "p2_title": "التصنيف والتجميع الذاتي",
+            "p2_desc": "ربط الموردين بدفتر كميات منضبط.",
+            "p3_tag": "الذكاء التنفيذي", "p3_title": "تحليل المصروفات ورؤى قابلة للتنفيذ",
+            "p3_desc": "مؤشرات جاهزة للإدارة ومعدل الإنفاق والرقابة.",
+            "welcome": "مرحباً بعودتك", "welcome_sub": "سجّل الدخول إلى مساحة عمل أنمات",
+            "email": "البريد الإلكتروني", "password": "كلمة المرور",
+            "remember": "تذكرني", "forgot": "نسيت كلمة المرور؟",
+            "signin": "تسجيل الدخول ←", "err": "البريد الإلكتروني أو كلمة المرور غير صحيحة.",
+        },
+    }[_ll]
+
     st.markdown("""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800;900&display=swap');
     .stApp { background-color: #050B14 !important; font-family: 'Inter', sans-serif !important; direction: ltr !important; }
     header[data-testid="stHeader"], footer { display: none !important; }
     .block-container { max-width: 1560px !important; padding-top: 2.2rem !important; padding-bottom: 2rem !important; }
@@ -892,16 +935,41 @@ if not st.session_state.logged_in:
     div[data-testid="column"]:nth-child(2) .stTextInput label p { color: #334155 !important; font-weight: 700 !important; font-size: 13.5px !important; margin-bottom: 4px !important; }
     div[data-testid="column"]:nth-child(2) .stTextInput input { border-radius: 10px !important; border: 1.5px solid #CBD5E1 !important; background-color: #F8FAFC !important; color: #0F172A !important; padding: 12px 16px !important; font-size: 15px !important; }
     div[data-testid="column"]:nth-child(2) .stTextInput input:focus { border-color: #0284C7 !important; background-color: #FFFFFF !important; }
-    div[data-testid="column"]:nth-child(2) button[kind="primary"] {
-        background: linear-gradient(135deg, #0284C7 0%, #0369A1 100%) !important; border: none !important;
+    .stApp button[kind="primary"],
+    .stApp [data-testid="stBaseButton-primary"],
+    .stApp button[data-testid="baseButton-primary"] {
+        background: linear-gradient(135deg, #0EA5E9 0%, #0284C7 100%) !important;
+        background-color: #0284C7 !important;
+        border: none !important;
         border-radius: 10px !important; font-weight: 800 !important; font-size: 16px !important;
-        padding: 13px !important; box-shadow: 0 10px 25px -5px rgba(2, 132, 199, 0.45) !important; margin-top: 15px !important;
+        padding: 13px !important; box-shadow: 0 10px 25px -5px rgba(14, 165, 233, 0.5) !important;
+        color: #FFFFFF !important;
     }
-    div[data-testid="column"]:nth-child(2) button[kind="primary"] p { color: #FFFFFF !important; }
+    .stApp button[kind="primary"] p,
+    .stApp [data-testid="stBaseButton-primary"] p { color: #FFFFFF !important; }
     </style>
     """, unsafe_allow_html=True)
 
-    st.markdown("""<div style="display:flex;justify-content:space-between;align-items:center;color:#64748B;font-size:13px;margin-bottom:16px;padding:0 8px;"><div style="display:flex;align-items:center;gap:10px;"><span style="background:#1E293B;color:#38BDF8;padding:4px 10px;border-radius:6px;font-weight:800;font-size:11.5px;">CONTECH VISUAL IDENTITY</span><span style="color:#94A3B8;font-weight:700;">Un-matt ConTech — Unified Login Experience</span></div><div style="font-weight:600;">Target: Enterprise SaaS & Field Web (1920x1080)</div></div>""", unsafe_allow_html=True)
+    hdr_brand, hdr_lang = st.columns([5.2, 1.35])
+    with hdr_brand:
+        st.markdown(
+            f"""<div style="display:flex;align-items:center;gap:10px;color:#64748B;font-size:13px;margin-bottom:8px;padding:0 8px;">
+            <span style="background:#1E293B;color:#38BDF8;padding:4px 10px;border-radius:6px;font-weight:800;font-size:11.5px;">{_L["top_badge"]}</span>
+            <span style="color:#94A3B8;font-weight:700;">{_L["top_experience"]}</span></div>""",
+            unsafe_allow_html=True,
+        )
+    with hdr_lang:
+        st.markdown('<div class="login-lang-row">', unsafe_allow_html=True)
+        lang_en_col, lang_ar_col = st.columns(2)
+        with lang_en_col:
+            if st.button("EN", use_container_width=True, key="login_lang_en"):
+                st.session_state.login_lang = "en"
+                st.rerun()
+        with lang_ar_col:
+            if st.button("عربي", use_container_width=True, key="login_lang_ar"):
+                st.session_state.login_lang = "ar"
+                st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
     col_brand, col_auth = st.columns([1.5, 0.95], gap="small")
     with col_brand:
@@ -909,10 +977,12 @@ if not st.session_state.logged_in:
             "<div style='background:radial-gradient(circle at 15% 15%, #132742 0%, #08111E 65%, #050B14 100%);border:1px solid rgba(255,255,255,0.08);border-radius:24px 0 0 24px;padding:50px 52px;min-height:720px;display:flex;flex-direction:column;justify-content:space-between;'>"
             "<div>"
             "<div style='font-size:28px;font-weight:900;color:#FFFFFF;letter-spacing:0.5px;'>Un-matt <span style='color:#38BDF8;'>ConTech</span></div>"
-            "<div style='font-size:11.5px;font-weight:700;color:#94A3B8;letter-spacing:0.15em;text-transform:uppercase;margin-top:4px;'>Enterprise Solutions &bull; Construction Technology</div>"
-            "<div style='display:inline-flex;align-items:center;gap:8px;background:rgba(14,165,233,0.12);border:1px solid rgba(56,189,248,0.35);padding:6px 14px;border-radius:8px;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#E0F2FE;margin:24px 0 20px 0;'>"
-            "<span style='width:8px;height:8px;border-radius:50%;background:#38BDF8;box-shadow:0 0 10px #38BDF8;'></span>Invoice Smart System</div>"
-            "<h1 style='font-size:40px;font-weight:800;color:#FFFFFF;line-height:1.25;margin-bottom:25px;'>Turn invoices into<br><span style='color:#38BDF8;'>controlled project data</span></h1>"
+            "<div style='font-size:11.5px;font-weight:700;color:#94A3B8;letter-spacing:0.15em;text-transform:uppercase;margin-top:4px;'>" + _L["brand_sub"] + "</div>"
+            "<div style='display:inline-flex;flex-direction:column;align-items:flex-start;gap:4px;background:rgba(14,165,233,0.12);border:1px solid rgba(56,189,248,0.35);padding:8px 14px;border-radius:8px;color:#E0F2FE;margin:24px 0 20px 0;'>"
+            "<div style='display:flex;align-items:center;gap:8px;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;'>"
+            "<span style='width:8px;height:8px;border-radius:50%;background:#38BDF8;box-shadow:0 0 10px #38BDF8;'></span>" + _L["product_label"] + "</div>"
+            "<div style='font-size:10px;font-weight:600;letter-spacing:0.04em;color:#7DD3FC;padding-left:16px;text-transform:none;'>" + _L["product_sub"] + "</div></div>"
+            "<h1 style='font-size:40px;font-weight:800;color:#FFFFFF;line-height:1.25;margin-bottom:25px;'>" + _L["hero_lead"] + "<br><span style='color:#38BDF8;'>" + _L["hero_highlight"] + "</span></h1>"
             "</div>"
             "<div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;'>"
             "<div style='background:rgba(15,23,42,0.85);border:1px solid rgba(255,255,255,0.08);border-top:3.5px solid #F97316;border-radius:14px;padding:14px;display:flex;flex-direction:column;justify-content:space-between;'>"
@@ -927,9 +997,9 @@ if not st.session_state.logged_in:
             "<polygon points='30,40 38,36 38,44' fill='#38BDF8' />"
             "<polygon points='130,40 122,36 122,44' fill='#38BDF8' />"
             "</svg></div>"
-            "<div><div style='font-size:10px;font-weight:800;color:#FB923C;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:4px;'>EXTRACTION ENGINE</div>"
-            "<div style='color:#FFFFFF;font-weight:700;font-size:13.5px;margin-bottom:4px;'>Smart Data Extraction</div>"
-            "<div style='color:#94A3B8;font-size:11.5px;line-height:1.4;'>Automated OCR parsing & dual textual verification.</div></div></div>"
+            "<div><div style='font-size:10px;font-weight:800;color:#FB923C;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:4px;'>" + _L["p1_tag"] + "</div>"
+            "<div style='color:#FFFFFF;font-weight:700;font-size:13.5px;margin-bottom:4px;'>" + _L["p1_title"] + "</div>"
+            "<div style='color:#94A3B8;font-size:11.5px;line-height:1.4;'>" + _L["p1_desc"] + "</div></div></div>"
             "<div style='background:rgba(15,23,42,0.85);border:1px solid rgba(255,255,255,0.08);border-top:3.5px solid #10B981;border-radius:14px;padding:14px;display:flex;flex-direction:column;justify-content:space-between;'>"
             "<div style='width:100%;height:100px;border-radius:10px;background:rgba(8,14,26,0.95);border:1px solid rgba(255,255,255,0.06);display:flex;align-items:center;justify-content:center;margin-bottom:12px;'>"
             "<svg width='100%' height='100%' viewBox='0 0 160 90' fill='none'>"
@@ -941,9 +1011,9 @@ if not st.session_state.logged_in:
             "<text x='96' y='56' fill='#6EE7B7' font-size='8.5' font-weight='700' font-family='monospace'>GL:SUB-CON</text>"
             "<path d='M74 45 L90 30 M74 45 L90 52' stroke='#10B981' stroke-width='1.5' stroke-dasharray='2 2' />"
             "</svg></div>"
-            "<div><div style='font-size:10px;font-weight:800;color:#34D399;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:4px;'>AUTO COST CODING</div>"
-            "<div style='color:#FFFFFF;font-weight:700;font-size:13.5px;margin-bottom:4px;'>Self Aggregation & Classification</div>"
-            "<div style='color:#94A3B8;font-size:11.5px;line-height:1.4;'>Dynamic vendor mapping into controlled BOQ ledger.</div></div></div>"
+            "<div><div style='font-size:10px;font-weight:800;color:#34D399;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:4px;'>" + _L["p2_tag"] + "</div>"
+            "<div style='color:#FFFFFF;font-weight:700;font-size:13.5px;margin-bottom:4px;'>" + _L["p2_title"] + "</div>"
+            "<div style='color:#94A3B8;font-size:11.5px;line-height:1.4;'>" + _L["p2_desc"] + "</div></div></div>"
             "<div style='background:rgba(15,23,42,0.85);border:1px solid rgba(255,255,255,0.08);border-top:3.5px solid #0EA5E9;border-radius:14px;padding:14px;display:flex;flex-direction:column;justify-content:space-between;'>"
             "<div style='width:100%;height:100px;border-radius:10px;background:rgba(8,14,26,0.95);border:1px solid rgba(255,255,255,0.06);display:flex;align-items:center;justify-content:center;margin-bottom:12px;'>"
             "<svg width='100%' height='100%' viewBox='0 0 160 90' fill='none'>"
@@ -956,21 +1026,27 @@ if not st.session_state.logged_in:
             "<text x='96' y='55' fill='#E0F2FE' font-size='8' font-weight='800'>&uarr; Cash Drift</text>"
             "<text x='96' y='64' fill='#7DD3FC' font-size='7.5' font-weight='600'>94% Efficiency</text>"
             "</svg></div>"
-            "<div><div style='font-size:10px;font-weight:800;color:#38BDF8;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:4px;'>EXECUTIVE INTELLIGENCE</div>"
-            "<div style='color:#FFFFFF;font-weight:700;font-size:13.5px;margin-bottom:4px;'>Expenses Analysis & Actionable Insights</div>"
-            "<div style='color:#94A3B8;font-size:11.5px;line-height:1.4;'>Board-ready A3 KPIs, burn rate, and cost control.</div></div></div>"
+            "<div><div style='font-size:10px;font-weight:800;color:#38BDF8;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:4px;'>" + _L["p3_tag"] + "</div>"
+            "<div style='color:#FFFFFF;font-weight:700;font-size:13.5px;margin-bottom:4px;'>" + _L["p3_title"] + "</div>"
+            "<div style='color:#94A3B8;font-size:11.5px;line-height:1.4;'>" + _L["p3_desc"] + "</div></div></div>"
             "</div></div>"
         )
         st.markdown(left_panel_html, unsafe_allow_html=True)
 
     with col_auth:
-        st.markdown("<h2>Welcome back</h2>", unsafe_allow_html=True)
-        st.markdown("<p class='sub-title'>Sign in to your Un-matt workspace</p>", unsafe_allow_html=True)
+        st.markdown(f"<h2>{_L['welcome']}</h2>", unsafe_allow_html=True)
+        st.markdown(f"<p class='sub-title'>{_L['welcome_sub']}</p>", unsafe_allow_html=True)
         
-        login_email = st.text_input("Email Address", value="", key="auth_email_field")
-        login_password = st.text_input("Password", type="password", value="", key="auth_password_field")
+        login_email = st.text_input(_L["email"], value="", key="auth_email_field")
+        login_password = st.text_input(_L["password"], type="password", value="", key="auth_password_field")
+
+        opt_remember, opt_forgot = st.columns([1, 1])
+        with opt_remember:
+            st.checkbox(_L["remember"], value=True, key="auth_remember_me")
+        with opt_forgot:
+            st.markdown(f'<div style="text-align:right;padding-top:10px;"><a href="#" style="color:#0284C7 !important;font-weight:700;text-decoration:none;font-size:13px;">{_L["forgot"]}</a></div>', unsafe_allow_html=True)
         
-        if st.button("Sign in →", type="primary", use_container_width=True):
+        if st.button(_L["signin"], type="primary", use_container_width=True):
             clean_email = login_email.strip().lower()
             clean_pwd = login_password.strip()
             user_found = next((k for k in st.session_state.users_db if k.lower() == clean_email), None)
@@ -981,9 +1057,7 @@ if not st.session_state.logged_in:
                 st.query_params["session_auth"] = "auth_valid_session"
                 st.rerun()
             else:
-                st.error("Invalid email or password.")
-                
-        st.markdown("""<div style="display:flex;align-items:center;justify-content:center;gap:8px;font-size:12px;color:#94A3B8;font-weight:600;border-top:1px solid #F1F5F9;padding-top:25px;margin-top:30px;"><span style="color:#94A3B8 !important;">Enterprise Grade &bull; 256-bit SSL Security Protocol</span></div>""", unsafe_allow_html=True)
+                st.error(_L["err"])
     st.stop()
 
 # ─── فحص المستخدم والحالة الأمنية لكلمة المرور ───
