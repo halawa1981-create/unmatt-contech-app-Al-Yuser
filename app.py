@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import json
+import html
 import requests
 import base64
 from PIL import Image
@@ -17,6 +18,10 @@ import hashlib
 import threading
 import string
 import secrets
+import uuid
+
+from client_invoices_module import render_client_invoices_tab
+from executive_analytics_service import get_project_executive_summary
 
 # ─── إدارة الملفات والمسارات ───
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -542,46 +547,70 @@ def optimize_image_for_upload(image, max_size=(1800, 1800), quality=88):
     img.save(buffer, format="JPEG", quality=quality, optimize=True)
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
-def analyze_invoice_with_gemini(image, prompt_text, api_key, current_project=""):
+def analyze_invoice_with_gemini(image, prompt_text, api_key, current_project="", module_type="custody"):
+    """
+    محرك استخراج مالي متقدم مدعوم بالتعلم السياقي السريع (Few-Shot In-Context Learning)
+    يقرأ ديناميكياً من مستودع العينات المعتمدة لنفس نوع الوحدة لرفع دقة القراءة والتحقق.
+    """
     img_str = optimize_image_for_upload(image, max_size=(1800, 1800), quality=88)
     clean_key = str(api_key).strip().replace('"', '').replace("'", '').split("\n")[0].split(",")[0].strip()
-    
+
     t_cfg = load_tuning_config()
-    if os.path.exists(TUNING_CONFIG_FILE):
-        try:
-            with open(TUNING_CONFIG_FILE, "r", encoding="utf-8") as f:
-                saved_cfg = json.load(f)
-                if isinstance(saved_cfg, dict):
-                    t_cfg.update(saved_cfg)
-        except Exception:
-            pass
-    required_schema = {
-        "invoice_no": "رقم المستند أو إيصال الصرف المطبوع/المكتوب",
-        "invoice_date": "التاريخ بصيغة YYYY-MM-DD",
-        "amount": "المبلغ الإجمالي المالي كـ float (مطابقاً تماماً للتفقيط المكتوب بالحروف)",
-        "vat": 0.0,
-        "description": "البيان أو اسم المستفيد المكتوب بوضوح",
-        "category": "اختر التصنيف الأنسب من: مقاولين / موردين / مواد / معدات / عمالة / نثريات",
-        "payment_method": "حدد بدقة الخيار غير المشطوب عليه من (نقداً / شيك / تحويل)",
-        "remark": "أي ملاحظات إضافية مثل رقم الشيك أو البنك"
-    }
-    if t_cfg.get("json_schema") != required_schema:
-        t_cfg["json_schema"] = required_schema
-        save_tuning_config(t_cfg)
-    candidate_models = []
-    if t_cfg.get("use_tuned_model") and t_cfg.get("active_tuned_model"):
-        candidate_models.append(t_cfg.get("active_tuned_model").strip())
+    schemas = t_cfg.get("schemas", {})
 
-    candidate_models.extend([
-        "gemini-3.5-flash-lite", 
-        "gemini-3.6-flash", 
-        "gemini-2.5-flash",
-        "gemini-2.0-flash", 
-        "gemini-1.5-flash"
-    ])
+    # تحديد السياسات وهيكل المخرجات حسب الوحدة
+    if module_type == "subcontractor":
+        sys_inst = t_cfg.get("inst_subcontractor", "أنت مراجع عقود ومستخلصات مقاولي باطن. مهمتك استخراج نسب الإنجاز وحصر الأعمال والمستحقات بدقة بصيغة JSON.")
+        active_schema = schemas.get("subcontractor", {
+            "subcontractor_name": "اسم مقاول الباطن",
+            "ipc_no": "رقم المستخلص",
+            "current_work_value": 0.0,
+            "retention_deduction": 0.0,
+            "advance_recovery": 0.0,
+            "net_payable": 0.0,
+            "statement_period": "فترة الأعمال"
+        })
+    elif module_type == "client":
+        sys_inst = t_cfg.get("inst_client", "أنت خبير تدقيق مستخلصات عملاء ومقايسات. مهمتك استخراج قيمة الأعمال المنجزة والضرائب والاستقطاعات بصيغة JSON.")
+        active_schema = schemas.get("client", {
+            "client_name": "اسم المالك",
+            "invoice_no": "رقم المستخلص",
+            "work_executed_amount": 0.0,
+            "retention_amount": 0.0,
+            "advance_payment_deduction": 0.0,
+            "vat_amount": 0.0,
+            "net_payable": 0.0,
+            "approval_status": "معتمد"
+        })
+    else:
+        sys_inst = t_cfg.get("inst_custody", t_cfg.get("system_instruction", "أنت مراجع مالي معتمد. مهمتك استخراج ومطابقة بيانات إيصالات وفواتير العهد والمصروفات بدقة ومطابقة التفقيط بالأرقام بصيغة JSON."))
+        active_schema = schemas.get("custody", t_cfg.get("json_schema", {
+            "invoice_no": "رقم الفاتورة أو المستند",
+            "invoice_date": "YYYY-MM-DD",
+            "amount": 0.0,
+            "vat": 0.0,
+            "description": "البيان أو اسم المستفيد",
+            "category": "موردين / مواد / مقاولين / عمالة / نثريات",
+            "payment_method": "نقدي / شيك / تحويل",
+            "remark": "ملاحظات"
+        }))
 
-    training_db = load_training_db()
-    learned_context = "\n\nأسماء الموردين وتصنيفاتهم المعتمدة فقط. يُمنع ذكر أو استخدام أي أرقام فواتير أو مبالغ أو تواريخ سابقة:\n"
+    # بناء سياق التعلم السريع (Few-Shot Examples) من مستودع العينات المعتمدة
+    approved_ds = load_approved_dataset()
+    matching_samples = [
+        s for s in approved_ds
+        if s.get("module_type", "custody") == module_type and isinstance(s.get("ground_truth"), dict)
+    ]
+
+    few_shot_context = ""
+    if matching_samples:
+        few_shot_context = "\n=== نماذج وأمثلة قياسية معتمدة سابقاً من إدارة المشروع (للاسترشاد بطريقة الاستخراج فقط دون نسخ أرقامها) ===\n"
+        # أخذ أحدث 3 عينات معتمدة لضمان بقاء حجم السياق مناسباً
+        for idx, sample in enumerate(matching_samples[:3], start=1):
+            gt_example = json.dumps(sample.get("ground_truth"), ensure_ascii=False)
+            few_shot_context += f"مثال معتمد ({idx}) - اسم المستند: {sample.get('input_doc', 'وثيقة')}\nالمخرجات المعتمدة المطابقة: {gt_example}\n---\n"
+
+    # جلب قاموس المصطلحات والموردين
     dict_text = str(st.session_state.get("system_dictionary", "") or "").strip()
     if not dict_text and os.path.exists(DICT_FILE):
         try:
@@ -589,38 +618,19 @@ def analyze_invoice_with_gemini(image, prompt_text, api_key, current_project="")
                 dict_text = f.read().strip()
         except Exception:
             dict_text = ""
-    if dict_text:
-        learned_context += f"{dict_text}\n"
-    seen_suppliers = set()
-    if training_db:
-        for item in training_db:
-            cd = item.get("correct_data", {})
-            supplier = str(cd.get("description", "")).strip()
-            category = str(cd.get("category", "")).strip()
-            if not supplier:
-                continue
-            key = (supplier, category)
-            if key in seen_suppliers:
-                continue
-            seen_suppliers.add(key)
-            learned_context += f"- المورد: '{supplier}' | التصنيف المعتمد: '{category}'\n"
 
-    sys_inst = t_cfg.get("system_instruction", "")
-    schema_json = json.dumps(t_cfg.get("json_schema", required_schema), ensure_ascii=False, indent=2)
+    dictionary_context = f"\nقواعد التصنيف وقاموس الأسماء المعتمدة بالمشروع:\n{dict_text}\n" if dict_text else ""
+    schema_json = json.dumps(active_schema, ensure_ascii=False, indent=2)
+
     active_rules = f"""
 {sys_inst}
-{learned_context}
-قواعد قراءة نموذج إيصال صرف (نقداً / شيك) والمستند الحالي فقط:
-1. [رقم المستند]: اقرأ جدول الفاتورة أو إيصال الصرف الحالي واستخرج رقم المستند الفعلي المطبوع أو المكتوب بخط اليد. لا تنقل أي رقم فاتورة من حركات سابقة.
-2. [التاريخ]: اقرأ التاريخ المكتوب بخط اليد في خانة التاريخ فقط، وأعده بصيغة YYYY-MM-DD بدقة من خانة التاريخ الفعلية للمستند وليس من أرقام الحسابات أو أرقام الشيكات.
-3. [المبلغ والتفقيط]: اقرأ المبلغ الرقمي من المستند الحالي وطابقه بدقة تامة مع النص المكتوب بالحروف (مثال للتوضيح فقط: مائتان وخمسون ألف جنيه = 250000). اعتمد القيمة المطابقة كـ float في خانة amount بعد تحويل الأرقام الهندية/العربية (٦ = 6، ٢ = 2). لا تستخدم مبالغ سابقة.
-4. [البيان / الوصف]: اجمع نص خانة "يصرف إلى السيد / السادة" مع خانة "وذلك عن" المكتوبتين بخط اليد نصاً كما هما داخل description. يمنع منعاً باتاً استبدالهما بأسماء من القاموس، أو ترك description فارغاً، أو تخمينه من القاموس.
-5. [الملاحظات]: استخرج أي بيانات شيكات (رقم الشيك، اسم البنك) أو تفاصيل إضافية وضعها في خانة remark.
-6. [طريقة الدفع]: إذا كان هناك رقم شيك مدون أو محدد "شيك"، تكون طريقة الدفع "شيك"، وإلا فتكون "نقدي".
-7. إلزام بملء جميع الحقول التالية وعدم ترك أي حقل فارغاً، وخصوصاً description:
+{dictionary_context}
+{few_shot_context}
+القواعد الإلزامية لاستخراج وتدقيق الوثيقة الحالية:
+1. اقرأ البيانات حصرياً من واقع صورة المستند المرفقة حالياً، ولا تفترض أو تنسخ أي أرقام من الأمثلة الاسترشادية أو السجلات السابقة.
+2. طابق المبالغ الرقمية مع التفقيط المكتوب بالحروف بدقة تامة واعتمد القيمة كـ float.
+3. التزم حرفياً بهيكل الحقول التالي وأعد كائن JSON مفرد ومباشر {{ }} فقط بدون نصوص تمهيدية:
 {schema_json}
-8. النتيجة المطلوبة كائن JSON مفرد ومباشر {{ }} فقط.
-تحذير: ممنوع اختلاق أو تخمين بيانات من مستندات سابقة. اعتمد حصرياً على النص والأرقام الظاهرة في صورة المستند الحالية.
 """
     final_prompt = prompt_text + "\n" + active_rules
     headers = {'Content-Type': 'application/json'}
@@ -629,25 +639,32 @@ def analyze_invoice_with_gemini(image, prompt_text, api_key, current_project="")
         "generationConfig": {"responseMimeType": "application/json", "temperature": 0.0}
     }
 
+    candidate_models = [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.6-flash"
+    ]
+
     last_error_details = []
     for model_name in candidate_models:
-        if model_name.startswith("tunedModels/"):
-            url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={clean_key}"
-        else:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={clean_key}"
-            
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={clean_key}"
         for attempt in range(2):
             try:
                 response = requests.post(url, headers=headers, json=payload, timeout=45)
                 if response.status_code == 200:
                     res_json = response.json()
                     candidates = res_json.get('candidates', [])
-                    if not candidates: continue
+                    if not candidates:
+                        continue
                     raw_text = candidates[0]['content']['parts'][0]['text']
                     match = re.search(r'\{.*\}', raw_text, re.DOTALL)
                     parsed = json.loads(match.group(0)) if match else {}
-                    if isinstance(parsed, list): parsed = parsed[0] if parsed else {}
-                    if not isinstance(parsed, dict): parsed = {}
+                    if isinstance(parsed, list):
+                        parsed = parsed[0] if parsed else {}
+                    if not isinstance(parsed, dict):
+                        parsed = {}
 
                     if "invoice_date" in parsed:
                         parsed["invoice_date"] = normalize_date(parsed["invoice_date"])
@@ -662,7 +679,7 @@ def analyze_invoice_with_gemini(image, prompt_text, api_key, current_project="")
             except Exception as e:
                 last_error_details.append(f"[{model_name}: استثناء {str(e)[:50]}]")
                 time.sleep(1.0)
-                
+
     err_summary = " | ".join(last_error_details) if last_error_details else "لا يوجد استجابة من الخادم"
     raise Exception(f"تعذر استخراج البيانات: {err_summary}")
 
@@ -698,37 +715,96 @@ def save_users_db(users_data):
     except Exception: return False
 
 def ask_project_assistant(user_query, project_name, invoices_list, rules_dict, api_key):
+    """
+    المستشار المالي الشامل للمشروع:
+    يقرأ من محرك الرقابة المالية التنفيذي الموسع، عقود مقاولي الباطن،
+    مستخلصات العميل، وحركات العهد والمصروفات.
+    """
     clean_key = str(api_key).strip().replace('"', '').replace("'", '').split("\n")[0].split(",")[0].strip()
+    target_proj = str(project_name or "").strip()
+
+    exec_summary = {}
+    try:
+        from executive_analytics_service import get_project_executive_summary
+        exec_summary = get_project_executive_summary(target_proj) or {}
+    except Exception:
+        exec_summary = {}
+
     project_records = []
     for inv in invoices_list or []:
         is_del = str(inv.get("delete", False)).strip().lower() in ["true", "1", "نعم"]
         if is_del:
             continue
-        if str(inv.get("project", "")).strip() != str(project_name).strip():
+        if str(inv.get("project", "")).strip() != target_proj:
             continue
         project_records.append(inv)
 
-    context_lines = []
-    for inv in project_records:
-        context_lines.append(
-            f"- السريال: {inv.get('serial_no', '')} | رقم المستند: {inv.get('invoice_no', '')} | "
+    custody_lines = []
+    for inv in project_records[-30:]:
+        try:
+            amt = float(inv.get("amount", 0) or 0)
+        except Exception:
+            amt = 0.0
+        custody_lines.append(
+            f"- [عهدة/فاتورة] سريال: {inv.get('serial_no', '')} | مستند: {inv.get('invoice_no', '')} | "
             f"التاريخ: {inv.get('invoice_date', '')} | البيان: {inv.get('description', '')} | "
-            f"المبلغ: {inv.get('amount', 0)} | طريقة الدفع: {inv.get('payment_method', '')} | "
-            f"التصنيف: {inv.get('category', '')} | الملاحظات: {inv.get('remark', '')}"
+            f"المبلغ: {amt:,.2f} | النوع: {inv.get('doc_type', '')} | "
+            f"التصنيف: {inv.get('category', '')} | طريقة السداد: {inv.get('payment_method', '')}"
         )
-    records_text = "\n".join(context_lines) if context_lines else "لا توجد حركات مسجلة لهذا المشروع."
-    if isinstance(rules_dict, dict):
-        rules_text = json.dumps(rules_dict, ensure_ascii=False)
-    else:
-        rules_text = str(rules_dict or "").strip()
+    custody_text = "\n".join(custody_lines) if custody_lines else "لا توجد حركات عهد مسجلة مؤخراً."
+
+    curr = st.session_state.get("project_currency", "ج.م")
+    summary_block = f"""
+=== الموقف المالي التنفيذي لمشروع ({target_proj}) ===
+العملة المعتمدة: {curr}
+1. التدفقات النقدية المباشرة:
+   - إجمالي المقبوضات المحصلة من العميل (Cash In): {float(exec_summary.get('total_cash_in', 0.0) or 0.0):,.2f} {curr}
+   - إجمالي المدفوعات التشغيلية (Cash Out): {float(exec_summary.get('total_cash_out', 0.0) or 0.0):,.2f} {curr}
+   - صافي السيولة النقدية المحققة (Net Cash Flow): {float(exec_summary.get('net_cash_flow', 0.0) or 0.0):,.2f} {curr}
+   - حالة السيولة: {exec_summary.get('financial_health_status', 'غير محدد')}
+
+2. التزامات ونفقات مقاولي الباطن والموردين:
+   - إجمالي قيم عقود مقاولي الباطن: {float(exec_summary.get('subcontracts_total_value', 0.0) or 0.0):,.2f} {curr}
+   - الأعمال المعتمدة لمقاولي الباطن: {float(exec_summary.get('subcontractors_approved_work', 0.0) or 0.0):,.2f} {curr}
+   - المسدد الفعلي لمقاولي الباطن: {float(exec_summary.get('subcontractors_paid', 0.0) or 0.0):,.2f} {curr}
+   - المتبقي مستحق السداد لمقاولي الباطن: {float(exec_summary.get('subcontractors_balance_due', 0.0) or 0.0):,.2f} {curr}
+   - محتجز ضمان أعمال مقاولي الباطن (Retention Payable): {float(exec_summary.get('subcontractors_retention', 0.0) or 0.0):,.2f} {curr}
+   - المسدد لموردي المواد والخامات: {float(exec_summary.get('material_suppliers_paid', 0.0) or 0.0):,.2f} {curr}
+   - مصاريف الموقع والنثريات: {float(exec_summary.get('general_site_expenses', 0.0) or 0.0):,.2f} {curr}
+
+3. موقف مستخلصات العميل والضمانات:
+   - إجمالي قيمة الأعمال المنفذة للعميل: {float(exec_summary.get('client_total_executed', 0.0) or 0.0):,.2f} {curr}
+   - مستخلصات قيد الاعتماد والمراجعة لدى الاستشاري (Pending): {float(exec_summary.get('client_pending_approval', 0.0) or 0.0):,.2f} {curr}
+   - محتجز ضمان الأعمال لدى المالك (Retention Receivable): {float(exec_summary.get('client_retention_receivable', 0.0) or 0.0):,.2f} {curr}
+   - رصيد غير محصل طرف العميل: {float(exec_summary.get('client_uncollected_balance', 0.0) or 0.0):,.2f} {curr}
+
+4. دورة الدفعة المقدمة (Advance Payment):
+   - الدفعة المقدمة المستلمة: {float(exec_summary.get('advance_payment_received', 0.0) or 0.0):,.2f} {curr}
+   - ما تم استقطاعه واستهلاكه منها: {float(exec_summary.get('advance_payment_recovered', 0.0) or 0.0):,.2f} {curr}
+   - المتبقي كالتزام بذمة المقاول: {float(exec_summary.get('advance_payment_balance', 0.0) or 0.0):,.2f} {curr}
+
+5. مؤشرات توقعات السيولة القادمة:
+   - سيولة متوقعة قادمة (مستخلصات تحت الاعتماد): {float(exec_summary.get('short_term_forecast_inflow', 0.0) or 0.0):,.2f} {curr}
+   - التزامات قريبة مستحقة للباطن: {float(exec_summary.get('short_term_forecast_outflow', 0.0) or 0.0):,.2f} {curr}
+   - صافي التدفق المتوقع: {float(exec_summary.get('short_term_forecast_net', 0.0) or 0.0):,.2f} {curr}
+"""
+
+    rules_text = json.dumps(rules_dict, ensure_ascii=False) if isinstance(rules_dict, dict) else str(rules_dict or "").strip()
 
     system_prompt = (
-        f"أنت المساعد المالي لمشروع {project_name}. أجب بدقة واختصار حصرياً ومن واقع السجلات المرفقة أدناه فقط. "
-        f"اذكر أرقام المستندات والمبالغ دائماً. إذا لم تجد المعلومة في السجلات، أجب بصراحة أنها غير مدونة ولا تفترض أي مبالغ."
+        f"أنت 'المساعد المالي' المعتمد لمشروع ({target_proj}). "
+        f"مهمتك تقديم تحليلات وإجابات رقابية دقيقة ومحايدة باللغة العربية بناءً على البيانات المالية المرفقة أدناه فقط. "
+        f"أنت مطلع بالكامل على: موقف مستخلصات العميل، عقود ومستخلصات مقاولي الباطن، فواتير الموردين، حركة العهد، الدفعة المقدمة، والمحتجزات. "
+        f"قواعد الإجابة الإلزامية:\n"
+        f"1. اذكر دائماً الأرقام والمبالغ مع العملة ({curr}) بدقة كما هي مسجلة.\n"
+        f"2. كن مباشراً، مهنياً، ومختصراً دون مقدمات إنشائية.\n"
+        f"3. إذا سُئلت عن تفاصيل غير واردة في البيانات، أجب بصراحة أنها غير مدونة في السجلات المعتمدة ولا تفترض أي مبالغ."
     )
+
     user_prompt = (
-        f"السجلات المرفقة:\n{records_text}\n\n"
-        f"قواعد المشروع (للاستئناس دون اختلاق مبالغ):\n{rules_text}\n\n"
+        f"{summary_block}\n\n"
+        f"=== عينات من أحدث حركات الفواتير والعهد ===\n{custody_text}\n\n"
+        f"قواعد وتصنيفات المشروع:\n{rules_text}\n\n"
         f"سؤال المستخدم:\n{user_query}"
     )
 
@@ -743,14 +819,14 @@ def ask_project_assistant(user_query, project_name, invoices_list, rules_dict, a
     payload = {
         "systemInstruction": {"parts": [{"text": system_prompt}]},
         "contents": [{"parts": [{"text": user_prompt}]}],
-        "generationConfig": {"temperature": 0.2}
+        "generationConfig": {"temperature": 0.15}
     }
 
     last_error_details = []
     for model_name in candidate_models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={clean_key}"
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=45)
+            response = requests.post(url, headers=headers, json=payload, timeout=40)
             if response.status_code == 200:
                 res_json = response.json()
                 candidates = res_json.get('candidates', [])
@@ -827,10 +903,37 @@ def render_portal_gateway():
             else:
                 st.button("قريباً (Coming Soon)", disabled=True, use_container_width=True, key=f"soon_{en_title}")
 
+CURRENCY_AR = ["ج.م", "ر.س", "$", "د.إ"]
+CURRENCY_EN = ["EGP", "SAR", "USD", "AED"]
+CURRENCY_TO_EN = dict(zip(CURRENCY_AR, CURRENCY_EN))
+CURRENCY_TO_AR = dict(zip(CURRENCY_EN, CURRENCY_AR))
+
+
+def currency_options_for_lang(lang):
+    return list(CURRENCY_AR) if lang == "العربية" else list(CURRENCY_EN)
+
+
+def normalize_project_currency(value, lang):
+    raw = str(value or "").strip()
+    if lang == "العربية":
+        if raw in CURRENCY_AR:
+            return raw
+        return CURRENCY_TO_AR.get(raw, "ج.م")
+    if raw in CURRENCY_EN:
+        return raw
+    return CURRENCY_TO_EN.get(raw, "EGP")
+
+
 # ─── التهيئة الآمنة لجميع متغيرات الجلسة ───
 ensure_hr_admin_data_files()
 if "system_lang" not in st.session_state: st.session_state.system_lang = "العربية"
 if "system_theme" not in st.session_state: st.session_state.system_theme = "Light"
+if "project_currency" not in st.session_state:
+    st.session_state.project_currency = "ج.م" if st.session_state.get("system_lang") == "العربية" else "EGP"
+else:
+    st.session_state.project_currency = normalize_project_currency(
+        st.session_state.project_currency, st.session_state.get("system_lang")
+    )
 st.session_state.users_db = load_users_db()
 if "projects_list" not in st.session_state: st.session_state.projects_list = load_projects_list()
 st.session_state.invoices_data = load_invoices_local_first()
@@ -1107,45 +1210,89 @@ is_super_admin = (user_role == "Super Admin")
 is_company_admin = (user_role == "Admin" or is_super_admin)
 is_ceo = (user_role == "CEO")
 is_accountant = (user_role == "Accountant")
-can_access_system_policies = str(user_role).strip() in ("Admin", "Super Admin")
+can_access_system_policies = (user_role == "Super Admin")
 if (not can_access_system_policies) and st.session_state.get("active_tab") == "memory":
     st.session_state.active_tab = "records"
     st.session_state.memory_unlocked = False
+    st.rerun()
 
 is_rtl = (st.session_state.system_lang == "العربية")
 dir_attr = "rtl" if is_rtl else "ltr"
 
-# ─── تهيئة التنسيق والألوان ───
+# ─── تهيئة التنسيق والألوان الموحدة (Ocean Navy & Petrol Blue Palette) ───
+PRIMARY_NAVY_START = "#0A2540"
+PRIMARY_NAVY_END = "#005C8A"
+PRIMARY_ACCENT_BLUE = "#0284C7"
+PRIMARY_BORDER_BLUE = "#0369A1"
+PRIMARY_NAVY_GRADIENT = f"linear-gradient(135deg, {PRIMARY_NAVY_START} 0%, {PRIMARY_NAVY_END} 100%)"
+
+_DS_FONT = """
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700;800&display=swap');
+html, body, .stApp, .stApp p, .stApp span, .stApp label, .stApp li,
+.stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6,
+.stApp button, .stApp input, .stApp textarea, .stApp select,
+.stApp table, .stApp td, .stApp th, .kpi-card, .kpi-card *,
+[data-testid="stMarkdownContainer"], [data-testid="stSidebar"],
+[data-testid="stDataFrame"], [data-baseweb="select"], [data-baseweb="input"] {
+    font-family: 'IBM Plex Sans Arabic', sans-serif !important;
+}
+.kpi-card {
+    transition: transform 0.2s ease, box-shadow 0.2s ease !important;
+}
+.kpi-card:hover {
+    transform: translateY(-2px) !important;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.06) !important;
+}
+"""
 if st.session_state.system_theme == "Dark":
     st.markdown(f"""
     <style>
+    {_DS_FONT}
     :root {{
-        --bg-main: #0B1120; --bg-card: #1E293B; --bg-input: #0F172A; --border-subtle: #334155; --border-strong: #475569;
-        --text-title: #F8FAFC; --text-body: #CBD5E1; --text-muted: #94A3B8; --brand-primary: #E8B423; --brand-navy: #2C3E50; --brand-gold: #E8B423;
+        --bg-main: #061525; --bg-card: #0A2540; --bg-input: #071A2E; --border-subtle: #1B4B6B; --border-strong: #0369A1;
+        --text-title: #F8FAFC; --text-body: #CBD5E1; --text-muted: #94A3B8;
+        --brand-primary: {PRIMARY_ACCENT_BLUE}; --brand-navy: {PRIMARY_NAVY_START}; --brand-gold: {PRIMARY_ACCENT_BLUE};
+        --brand-navy-end: {PRIMARY_NAVY_END}; --brand-border: {PRIMARY_BORDER_BLUE};
+        --brand-gradient: {PRIMARY_NAVY_GRADIENT};
         --kpi-inflow-bg: rgba(6, 78, 59, 0.25); --kpi-inflow-border: #10B981; --kpi-inflow-text: #34D399;
         --kpi-outflow-bg: rgba(127, 29, 29, 0.25); --kpi-outflow-border: #EF4444; --kpi-outflow-text: #F87171;
-        --kpi-card-bg: #E3F4FB; --kpi-card-border: #B7D7EA; --kpi-card-accent: #E8B423; --kpi-card-label: #C9A227; --kpi-card-value: #B8860B;
-        --table-header-bg: #2C3E50; --table-row-even: #1E293B; --table-row-odd: #182234; --table-row-hover: #26354D; --table-border: #334155;
+        --kpi-card-bg: #0A2540; --kpi-card-border: #1B4B6B; --kpi-card-accent: {PRIMARY_ACCENT_BLUE}; --kpi-card-label: #F8FAFC; --kpi-card-value: #F8FAFC;
+        --table-header-bg: {PRIMARY_NAVY_START}; --table-row-even: #0A2540; --table-row-odd: #071A2E; --table-row-hover: #0E3A5C; --table-border: #1B4B6B;
     }}
     .stApp {{ background-color: var(--bg-main) !important; color: var(--text-body) !important; direction: {dir_attr}; }}
-    section[data-testid="stSidebar"] {{ background-color: #15202B !important; border-left: 2px solid #E8B423 !important; direction: {dir_attr}; }}
-    button[kind="primary"] {{ background: linear-gradient(135deg, #2C3E50 0%, #1A2834 100%) !important; border: 1px solid #E8B423 !important; }}
-    .grid-header {{ background-color: #2C3E50 !important; color: #FFFFFF !important; font-weight: 900; font-size: 14px; padding: 12px 6px; border-radius: 0; text-align: center; border: none; border-bottom: 3px solid #E8B423 !important; z-index: 40 !important; }}
+    section[data-testid="stSidebar"] {{ background-color: #071A2E !important; border-left: 2px solid {PRIMARY_ACCENT_BLUE} !important; direction: {dir_attr}; }}
+    button[kind="primary"] {{
+        background: {PRIMARY_NAVY_GRADIENT} !important;
+        border: 1px solid {PRIMARY_BORDER_BLUE} !important;
+        color: #FFFFFF !important;
+    }}
+    .grid-header {{
+        background: {PRIMARY_NAVY_GRADIENT} !important; color: #FFFFFF !important; font-weight: 900; font-size: 14px;
+        padding: 12px 6px; border-radius: 0; text-align: center; border: none;
+        border-bottom: 3px solid {PRIMARY_ACCENT_BLUE} !important; z-index: 40 !important;
+    }}
     .grid-row-inbound {{ background-color: var(--kpi-inflow-bg) !important; color: var(--kpi-inflow-text) !important; font-weight: 700; padding: 8px 4px; border-radius: 6px; border: 1px solid var(--kpi-inflow-border); text-align: center; margin-bottom: 4px; font-size: 13px; }}
     .grid-row-outbound {{ background-color: var(--kpi-outflow-bg) !important; color: var(--kpi-outflow-text) !important; font-weight: 700; padding: 8px 4px; border-radius: 6px; border: 1px solid var(--kpi-outflow-border); text-align: center; margin-bottom: 4px; font-size: 13px; }}
-    [data-testid="stFileUploader"] {{ background: var(--bg-input) !important; border: 1.5px dashed var(--border-strong) !important; border-radius: 10px; }}
+    [data-testid="stFileUploader"] {{ background: var(--bg-input) !important; border: 1.5px dashed var(--border-strong) !important; border-radius: 12px; }}
     .kpi-card {{
         flex: 1; background: var(--kpi-card-bg) !important; border: 1px solid var(--kpi-card-border) !important;
-        border-top: 3px solid var(--kpi-card-accent) !important; padding: 18px 14px; border-radius: 10px; text-align: center;
+        border-top: 3px solid var(--kpi-card-accent) !important; padding: 18px 14px; border-radius: 12px; text-align: center;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
     }}
     .kpi-card h5, .kpi-card h4 {{ color: var(--kpi-card-label) !important; margin: 0 !important; font-size: 17px !important; font-weight: 800 !important; text-align: center !important; }}
     .kpi-card h3, .kpi-card h2 {{ color: var(--kpi-card-value) !important; margin: 8px 0 0 0 !important; font-size: 30px !important; font-weight: 800 !important; text-align: center !important; }}
-    .att-chip {{ display: inline-block; font-size: 12px; font-weight: 800; color: #C9A227; text-decoration: none; margin: 0 3px; }}
-    .att-chip:hover {{ color: #E8B423; }}
+    .att-chip {{ display: inline-block; font-size: 12px; font-weight: 800; color: {PRIMARY_ACCENT_BLUE}; text-decoration: none; margin: 0 3px; }}
+    .att-chip:hover {{ color: #38BDF8; }}
     .section-banner {{
-        background-color: var(--table-header-bg); color: #FFFFFF; padding: 14px 25px; border-radius: 8px;
-        font-size: 20px; font-weight: 800; margin-bottom: 20px; text-align: {"right" if is_rtl else "left"};
-        direction: {dir_attr}; border-{"right" if is_rtl else "left"}: 6px solid var(--brand-primary);
+        display: inline-flex; align-items: center;
+        padding: 8px 18px; border-radius: 8px;
+        font-size: 15px; font-weight: 800; margin-bottom: 14px;
+        background: {PRIMARY_NAVY_GRADIENT}; color: #FFFFFF;
+        width: fit-content; max-width: 100%;
+        text-align: {"right" if is_rtl else "left"};
+        direction: {dir_attr};
+        border: none;
+        border-right: 4px solid {PRIMARY_ACCENT_BLUE};
     }}
     .stApp h1, .stApp h2, .stApp h3 {{ text-align: {"right" if is_rtl else "left"} !important; }}
     </style>
@@ -1153,67 +1300,336 @@ if st.session_state.system_theme == "Dark":
 else:
     st.markdown(f"""
     <style>
+    {_DS_FONT}
     :root {{
-        --bg-main: #F8FAFC; --bg-card: #FFFFFF; --border-subtle: #E2E8F0; --border-strong: #CBD5E1;
-        --text-title: #2C3E50; --text-body: #334155; --text-muted: #64748B; --brand-primary: #C9A227; --brand-navy: #2C3E50; --brand-gold: #E8B423;
+        --bg-main: #F4F8FB; --bg-card: #FFFFFF; --border-subtle: #D6E4EF; --border-strong: #A8C5D8;
+        --text-title: {PRIMARY_NAVY_START}; --text-body: #334155; --text-muted: #64748B;
+        --brand-primary: {PRIMARY_ACCENT_BLUE}; --brand-navy: {PRIMARY_NAVY_START}; --brand-gold: {PRIMARY_ACCENT_BLUE};
+        --brand-navy-end: {PRIMARY_NAVY_END}; --brand-border: {PRIMARY_BORDER_BLUE};
+        --brand-gradient: {PRIMARY_NAVY_GRADIENT};
         --kpi-inflow-bg: #F0FDF4; --kpi-inflow-border: #10B981; --kpi-inflow-text: #047857;
         --kpi-outflow-bg: #FEF2F2; --kpi-outflow-border: #EF4444; --kpi-outflow-text: #B91C1C;
-        --kpi-card-bg: #E3F4FB; --kpi-card-border: #B7D7EA; --kpi-card-accent: #E8B423; --kpi-card-label: #C9A227; --kpi-card-value: #B8860B;
-        --table-header-bg: #2C3E50; --table-row-even: #FFFFFF; --table-row-odd: #F8FAFC; --table-row-hover: #F7F4EC; --table-border: #E2E8F0;
+        --kpi-card-bg: #FFFFFF; --kpi-card-border: #D6E4EF; --kpi-card-accent: {PRIMARY_ACCENT_BLUE}; --kpi-card-label: {PRIMARY_NAVY_START}; --kpi-card-value: {PRIMARY_NAVY_START};
+        --table-header-bg: {PRIMARY_NAVY_START}; --table-row-even: #FFFFFF; --table-row-odd: #F4F8FB; --table-row-hover: #E8F3FA; --table-border: #D6E4EF;
     }}
     .stApp {{ background-color: var(--bg-main) !important; color: var(--text-body) !important; direction: {dir_attr}; }}
-    section[data-testid="stSidebar"] {{ background-color: #F6F4EE !important; border-left: 2px solid #E8B423 !important; direction: {dir_attr}; }}
-    button[kind="primary"] {{ background: linear-gradient(135deg, #2C3E50 0%, #1A2834 100%) !important; border: 1px solid #E8B423 !important; }}
-    .grid-header {{ background-color: #2C3E50 !important; color: #FFFFFF !important; font-weight: 900; font-size: 14px; padding: 12px 6px; border-radius: 0; text-align: center; border: none; border-bottom: 3px solid #E8B423 !important; z-index: 40 !important; }}
+    section[data-testid="stSidebar"] {{ background-color: #EEF5FA !important; border-left: 2px solid {PRIMARY_ACCENT_BLUE} !important; direction: {dir_attr}; }}
+    button[kind="primary"] {{
+        background: {PRIMARY_NAVY_GRADIENT} !important;
+        border: 1px solid {PRIMARY_BORDER_BLUE} !important;
+        color: #FFFFFF !important;
+    }}
+    .grid-header {{
+        background: {PRIMARY_NAVY_GRADIENT} !important; color: #FFFFFF !important; font-weight: 900; font-size: 14px;
+        padding: 12px 6px; border-radius: 0; text-align: center; border: none;
+        border-bottom: 3px solid {PRIMARY_ACCENT_BLUE} !important; z-index: 40 !important;
+    }}
     .grid-row-inbound {{ background-color: var(--kpi-inflow-bg) !important; color: var(--kpi-inflow-text) !important; font-weight: 700; padding: 8px 4px; border-radius: 6px; border: 1px solid var(--kpi-inflow-border); text-align: center; margin-bottom: 4px; font-size: 13px; }}
     .grid-row-outbound {{ background-color: var(--kpi-outflow-bg) !important; color: var(--kpi-outflow-text) !important; font-weight: 700; padding: 8px 4px; border-radius: 6px; border: 1px solid var(--kpi-outflow-border); text-align: center; margin-bottom: 4px; font-size: 13px; }}
-    [data-testid="stFileUploader"] {{ background: var(--bg-card) !important; border: 1.5px dashed var(--border-strong) !important; border-radius: 10px; }}
+    [data-testid="stFileUploader"] {{ background: var(--bg-card) !important; border: 1.5px dashed var(--border-strong) !important; border-radius: 12px; }}
     .kpi-card {{
         flex: 1; background: var(--kpi-card-bg) !important; border: 1px solid var(--kpi-card-border) !important;
-        border-top: 3px solid var(--kpi-card-accent) !important; padding: 18px 14px; border-radius: 10px; text-align: center;
+        border-top: 3px solid var(--kpi-card-accent) !important; padding: 18px 14px; border-radius: 12px; text-align: center;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
     }}
     .kpi-card h5, .kpi-card h4 {{ color: var(--kpi-card-label) !important; margin: 0 !important; font-size: 17px !important; font-weight: 800 !important; text-align: center !important; }}
     .kpi-card h3, .kpi-card h2 {{ color: var(--kpi-card-value) !important; margin: 8px 0 0 0 !important; font-size: 30px !important; font-weight: 800 !important; text-align: center !important; }}
-    .att-chip {{ display: inline-block; font-size: 12px; font-weight: 800; color: #C9A227; text-decoration: none; margin: 0 3px; }}
-    .att-chip:hover {{ color: #E8B423; }}
+    .att-chip {{ display: inline-block; font-size: 12px; font-weight: 800; color: {PRIMARY_ACCENT_BLUE}; text-decoration: none; margin: 0 3px; }}
+    .att-chip:hover {{ color: {PRIMARY_BORDER_BLUE}; }}
     .section-banner {{
-        background-color: var(--table-header-bg); color: #FFFFFF; padding: 14px 25px; border-radius: 8px;
-        font-size: 20px; font-weight: 800; margin-bottom: 20px; text-align: {"right" if is_rtl else "left"};
-        direction: {dir_attr}; border-{"right" if is_rtl else "left"}: 6px solid var(--brand-primary);
+        display: inline-flex; align-items: center;
+        padding: 8px 18px; border-radius: 8px;
+        font-size: 15px; font-weight: 800; margin-bottom: 14px;
+        background: {PRIMARY_NAVY_GRADIENT}; color: #FFFFFF;
+        width: fit-content; max-width: 100%;
+        text-align: {"right" if is_rtl else "left"};
+        direction: {dir_attr};
+        border: none;
+        border-right: 4px solid {PRIMARY_ACCENT_BLUE};
     }}
     .stApp h1, .stApp h2, .stApp h3 {{ text-align: {"right" if is_rtl else "left"} !important; }}
     </style>
     """, unsafe_allow_html=True)
 
-st.markdown("""
+st.markdown(f"""
 <style>
-.inv-table-marker { display: none !important; height: 0 !important; margin: 0 !important; padding: 0 !important; }
-.inv-table-head [data-testid="stHorizontalBlock"] {
-    background-color: #2C3E50 !important;
-    border-radius: 10px 10px 0 0 !important;
+.section-banner {{
+    display: inline-flex !important;
+    align-items: center !important;
+    width: auto !important;
+    max-width: 100% !important;
+    padding: 8px 18px !important;
+    border-radius: 8px !important;
+    font-size: 15px !important;
+    font-weight: 800 !important;
+    margin-bottom: 14px !important;
+    background: {PRIMARY_NAVY_GRADIENT} !important;
+    color: #FFFFFF !important;
+    border: none !important;
+    border-right: 4px solid {PRIMARY_ACCENT_BLUE} !important;
+    box-sizing: border-box !important;
+}}
+div[data-testid="stMarkdownContainer"]:has(.section-banner) {{
+    width: fit-content !important;
+    max-width: 100% !important;
+}}
+div[data-testid="stMarkdownContainer"]:has(.section-banner) > div {{
+    width: fit-content !important;
+    max-width: 100% !important;
+}}
+.inv-table-marker {{ display: none !important; height: 0 !important; margin: 0 !important; padding: 0 !important; }}
+.inv-table-head [data-testid="stHorizontalBlock"] {{
+    background: {PRIMARY_NAVY_GRADIENT} !important;
+    border-radius: 12px 12px 0 0 !important;
     padding: 4px 8px 2px 8px !important;
     margin-bottom: 0 !important;
-}
-.inv-table-head [data-testid="column"] { background-color: #2C3E50 !important; }
-div[data-testid="stVerticalBlock"][style*="overflow"]:has(.inv-table-marker) {
+}}
+.inv-table-head [data-testid="column"] {{ background: transparent !important; }}
+div[data-testid="stVerticalBlock"][style*="overflow"]:has(.inv-table-marker) {{
     max-height: 62vh !important;
     overflow-y: auto !important;
     overflow-x: hidden !important;
-    border: 1px solid #E8B42355 !important;
+    border: 1px solid #D6E4EF !important;
     border-top: none !important;
-    border-radius: 0 0 10px 10px !important;
+    border-radius: 0 0 12px 12px !important;
     padding: 6px 8px 10px 8px !important;
     margin-top: 0 !important;
+}}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+<style>
+/* حاوية شريط التبويبات كألسنة مجلدات */
+.folder-tabs-wrapper {
+    display: flex;
+    align-items: flex-end;
+    justify-content: flex-start;
+    gap: 6px;
+    border-bottom: 2px solid #005C8A;
+    padding-bottom: 0px;
+    margin-bottom: 20px;
+    direction: rtl;
+}
+.folder-tab-anchor,
+.invoice-drop-anchor {
+    display: none !important;
+}
+[data-testid="stElementContainer"]:has(> [data-testid="stMarkdown"] .folder-tab-anchor),
+[data-testid="stElementContainer"]:has(> [data-testid="stMarkdownContainer"] .folder-tab-anchor) {
+    display: none !important;
+    height: 0 !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: hidden !important;
+}
+/* زر التبويب */
+div[data-testid="stHorizontalBlock"]:has(.folder-tab-anchor) {
+    display: flex !important;
+    align-items: flex-end !important;
+    justify-content: flex-start !important;
+    direction: rtl !important;
+    border-bottom: 2px solid #005C8A !important;
+    gap: 8px !important;
+    margin-bottom: 20px !important;
+    padding-bottom: 0px !important;
+}
+div[data-testid="stHorizontalBlock"]:has(.folder-tab-anchor) [data-testid="stColumn"] {
+    width: auto !important;
+    flex: 0 0 auto !important;
+    min-width: max-content !important;
+}
+div[data-testid="stHorizontalBlock"]:has(.folder-tab-anchor) [data-testid="stColumn"]:last-child {
+    flex: 1 1 auto !important;
+    width: auto !important;
+    min-width: 12px !important;
+}
+div[data-testid="stHorizontalBlock"]:has(.folder-tab-anchor) button {
+    width: auto !important;
+    white-space: nowrap !important;
+    border-radius: 10px 10px 0 0 !important;
+    border: 1px solid #CBD5E1 !important;
+    border-bottom: none !important;
+    padding: 8px 20px !important;
+    font-weight: 800 !important;
+    font-size: 14px !important;
+    background: #F8FAFC !important;
+    color: #475569 !important;
+    box-shadow: none !important;
+    margin-bottom: -2px !important;
+    height: auto !important;
+    min-height: 0 !important;
+}
+div[data-testid="stHorizontalBlock"]:has(.folder-tab-anchor) button p {
+    white-space: nowrap !important;
+    margin: 0 !important;
+    line-height: 1.3 !important;
+}
+div[data-testid="stHorizontalBlock"]:has(.folder-tab-anchor) button * {
+    font-weight: 800 !important;
+    font-size: 14px !important;
+    color: #475569 !important;
+}
+/* التبويب النشط المحدد */
+div[data-testid="stHorizontalBlock"]:has(.folder-tab-anchor) button[kind="primary"],
+div[data-testid="stHorizontalBlock"]:has(.folder-tab-anchor) button[data-testid="stBaseButton-primary"] {
+    background: linear-gradient(135deg, #0A2540 0%, #005C8A 100%) !important;
+    color: #FFFFFF !important;
+    border: 2px solid #005C8A !important;
+    border-bottom: 2px solid #005C8A !important;
+}
+div[data-testid="stHorizontalBlock"]:has(.folder-tab-anchor) button[kind="primary"] *,
+div[data-testid="stHorizontalBlock"]:has(.folder-tab-anchor) button[data-testid="stBaseButton-primary"] * {
+    color: #FFFFFF !important;
+}
+/* صندوق رفع المستندات — Ocean Navy، دون ضغط النص الداخلي */
+div[data-testid="stHorizontalBlock"]:has(.invoice-drop-anchor) {
+    align-items: flex-end !important;
+}
+.upload-paste-hint {
+    margin-top: 8px;
+    font-family: 'IBM Plex Sans Arabic', sans-serif;
+    font-size: 12px;
+    line-height: 1.5;
+    font-weight: 600;
+    color: #005C8A;
+}
+div[data-testid="stHorizontalBlock"]:has(.invoice-drop-anchor) [data-testid="stFileUploader"] {
+    background: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    font-family: 'IBM Plex Sans Arabic', sans-serif !important;
+}
+div[data-testid="stHorizontalBlock"]:has(.invoice-drop-anchor) [data-testid="stFileUploaderDropzone"] {
+    background: #F4F8FB !important;
+    border: 1.5px dashed #005C8A !important;
+    border-radius: 12px !important;
+    min-height: 96px !important;
+    padding: 16px 18px !important;
+    font-family: 'IBM Plex Sans Arabic', sans-serif !important;
+}
+div[data-testid="stHorizontalBlock"]:has(.invoice-drop-anchor) [data-testid="stFileUploaderDropzone"] [data-testid="stIconMaterial"] {
+    display: none !important;
+    width: 0 !important;
+    height: 0 !important;
+    overflow: hidden !important;
+    font-size: 0 !important;
+}
+div[data-testid="stHorizontalBlock"]:has(.invoice-drop-anchor) [data-testid="stFileUploaderDropzone"] button {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    min-height: 0 !important;
+    height: auto !important;
+    padding: 0 !important;
+    width: 100% !important;
+}
+div[data-testid="stHorizontalBlock"]:has(.invoice-drop-anchor) [data-testid="stFileUploaderDropzone"] button p {
+    font-size: 0 !important;
+    line-height: 0 !important;
+    margin: 0 !important;
+    color: transparent !important;
+}
+div[data-testid="stHorizontalBlock"]:has(.invoice-drop-anchor) [data-testid="stFileUploaderDropzone"] button p::after {
+    content: "تصفح الملفات أو أفلتها هنا";
+    display: block;
+    font-family: 'IBM Plex Sans Arabic', sans-serif !important;
+    font-size: 15px !important;
+    line-height: 1.45 !important;
+    font-weight: 800 !important;
+    color: #0A2540 !important;
+}
+div[data-testid="stHorizontalBlock"]:has(.invoice-drop-anchor) [data-testid="stFileUploaderDropzoneInstructions"],
+div[data-testid="stHorizontalBlock"]:has(.invoice-drop-anchor) [data-testid="stFileUploaderDropzoneInstructions"] * {
+    font-size: 0 !important;
+    line-height: 0 !important;
+    color: transparent !important;
+}
+div[data-testid="stHorizontalBlock"]:has(.invoice-drop-anchor) [data-testid="stFileUploaderDropzoneInstructions"]::after {
+    content: "PDF أو صور  ·  حتى 200MB  ·  Ctrl+V للصق";
+    display: block;
+    margin-top: 6px;
+    font-family: 'IBM Plex Sans Arabic', sans-serif !important;
+    font-size: 12px !important;
+    line-height: 1.45 !important;
+    font-weight: 600 !important;
+    color: #005C8A !important;
+}
+div[data-testid="stElementContainer"]:has(#invoice-paste-hook) {
+    height: 0 !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: hidden !important;
 }
 </style>
 """, unsafe_allow_html=True)
+
+if not is_rtl:
+    st.markdown("""
+    <style>
+    div[data-testid="stHorizontalBlock"]:has(.invoice-drop-anchor) [data-testid="stFileUploaderDropzone"] button p::after {
+        content: "Browse files or drop them here";
+    }
+    div[data-testid="stHorizontalBlock"]:has(.invoice-drop-anchor) [data-testid="stFileUploaderDropzoneInstructions"]::after {
+        content: "PDF or images · up to 200MB · Ctrl+V to paste";
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
 if st.session_state.system_lang == "العربية":
     t = {
         "add_proj": "➕ إضافة مشروع جديد...", "proj_label": "المشروع الحالي:", "save_proj": "حفظ المشروع", "new_proj_name": "اسم المشروع الجديد:",
         "user_mgmt": "⚙️ إدارة المستخدمين", "logout": "🚪 خروج", "user_mgmt_title": "👥 لوحة التحكم في المستخدمين والصلاحيات",
-        "tab_records": "📑 سجل ومطابقة الفواتير", "tab_analytics": "📊 مؤشرات وتحليلات المشروع", "tab_memory": "⚙️ سياسات وضوابط النظام",
-        "metric_in": "العهدة الواردة ⬇️", "metric_out": "إجمالي المنصرف ↗️", "metric_bal": "صافي السيولة 💰", "metric_burn": "معدل الاستهلاك ⚡", "curr": "ج.م",
+        "tab_records": "📑 سجل ومطابقة الفواتير", "tab_custody_analytics": "📊 تحليلات ومؤشرات العهد والمصروفات", "tab_analytics": "📊 مؤشرات وتحليلات المشروع", "tab_memory": "⚙️ سياسات وضوابط النظام",
+        "metric_in": "المقبوضات والتمويلات الواردة ⬇️", "metric_out": "المدفوعات والمصروفات التشغيلية ↗️", "metric_bal": "رصيد السيولة المتاح 💰", "metric_burn": "معدل استنزاف السيولة ⚡", "curr": "ج.م",
+        "currency_label": "العملة:",
+        "files_first": "⚠️ يرجى إرفاق أو سحب ملفات الفواتير أولاً.",
+        "exec_status_surplus": "فائض نقدي متاح",
+        "exec_status_deficit": "عجز سيولة يتطلب تمويلاً",
+        "exec_status_balanced": "نقطة تعادل",
+        "exec_kpi_in_title": "المقبوضات المحصلة",
+        "exec_kpi_in_sub": "تحصيلات مستخلصات العميل",
+        "exec_kpi_out_title": "إجمالي المدفوعات",
+        "exec_kpi_out_sub": "مقاولو باطن وموردون ونثريات",
+        "exec_kpi_net_title": "صافي السيولة النقدية",
+        "exec_kpi_net_sub": "الفارق النقدي المحقق بالمشروع",
+        "exec_coverage": "التغطية",
+        "exec_kpi_pending_title": "مستخلصات قيد الاعتماد",
+        "exec_kpi_pending_sub": "سيولة متوقعة تحت مراجعة الاستشاري",
+        "exec_kpi_ret_title": "محتجز ضمان الأعمال",
+        "exec_kpi_ret_sub": "مبالغ محتجزة طرف العميل لحين التسليم",
+        "exec_kpi_adv_title": "رصيد الدفعة المقدمة المتبقي",
+        "exec_kpi_adv_sub": "التزام مالي متبقٍ للاستهلاك",
+        "exec_exposure_title": "تدقيق الالتزامات التعاقدية والمحتجزات ودورة الدفعة المقدمة",
+        "exec_advance_cycle": "دورة الدفعة المقدمة",
+        "exec_adv_received": "إجمالي الدفعة المستلمة",
+        "exec_adv_recovered": "ما تم استقطاعه واستهلاكه",
+        "exec_adv_remaining": "المتبقي كالتزام بذمة المقاول",
+        "exec_ret_section": "محتجزات ضمان الأعمال",
+        "exec_ret_client": "محتجز لدى العميل",
+        "exec_ret_sub": "محتجز على مقاولي الباطن",
+        "exec_ret_gap": "صافي فجوة الضمانات",
+        "exec_outflow_section": "تفصيل التدفق الخارج الفعلي",
+        "exec_paid_sub": "المسدد لمقاولي الباطن",
+        "exec_paid_mat": "المسدد لموردي المواد والخامات",
+        "exec_paid_site": "مصاريف موقع ونثريات",
+        "exec_sub_due": "التزامات الباطن غير المسددة",
+        "exec_chart_expense": "هيكل النفقات والمدفوعات الإنشائية",
+        "exec_chart_forecast": "توقع السيولة القريب",
+        "exec_no_expenses": "لا توجد حركات منصرف مسجلة للمشروع حتى الآن.",
+        "exec_lbl_subs": "مقاولو الباطن",
+        "exec_lbl_mat": "موردو المواد والخامات",
+        "exec_lbl_site": "مصاريف موقع وعمالة",
+        "exec_bar_in": "وارد متوقع من مستخلصات تحت الاعتماد",
+        "exec_bar_out": "التزام مستحق لمقاولي باطن غير مسدد",
+        "exec_bar_net": "صافي التدفق المتوقع",
+        "exec_horizon": "الأسبوعين القادمين",
+        "exec_print_company": "شركة اليسر للمقاولات العامة",
+        "exec_print_title": "التقرير المالي التنفيذي الشامل وإدارة السيولة والمخاطر",
+        "exec_print_project": "المشروع",
         "filter_title": "🔍 أدوات البحث وتصفية السجلات", "filter_cat": "📂 التصنيف:", "filter_pay": "💳 طريقة الدفع:", "filter_date": "📅 الفترة:",
         "all": "الكل", "today": "اليوم", "this_week": "هذا الأسبوع", "this_month": "هذا الشهر", "custom": "فترة مخصصة", "from_date": "من تاريخ:", "to_date": "إلى تاريخ:",
         "no_records": "لا توجد سجلات مطابقة حالياً لعرضها في الجدول", "export_excel": "📥 تصدير السجلات إلى Excel (.xlsx)",
@@ -1240,11 +1656,12 @@ if st.session_state.system_lang == "العربية":
         "pwd_btn": "🔑 كلمة المرور", "del_proj_help": "حذف المشروع", "confirm": "تأكيد", "cancel": "إلغاء",
         "proj_deleted": "تم حذف المشروع", "brand_fallback": "اليسر للهندسة والمقاولات",
         "role_super": "🛡️ مدير النظام", "role_admin": "👑 مدير الشركة", "role_ceo": "💼 الرئيس التنفيذي", "role_acc": "📊 محاسب",
-        "assistant_title": "💼 المساعد المالي الذكي", "assistant_info": "تحليل مباشر لبيانات المشروع:",
+        "assistant_title": "💼 المساعد المالي", "assistant_info": "تحليل مباشر لبيانات المشروع:",
         "assistant_you": "أنت", "assistant_bot": "المساعد",
         "assistant_placeholder": "اكتب سؤالك هنا عن فواتير ومصروفات المشروع...",
+        "assistant_send": "إرسال",
         "assistant_clear": "مسح المحادثة 🗑️", "assistant_spinner": "جاري استرجاع البيانات والتدقيق...",
-        "analytics_title": "📊 مؤشرات وتحليلات المشروع", "print_report": "🖨️ طباعة التقرير التنفيذي المعتمد (A3)",
+        "analytics_title": "📊 تحليلات ومؤشرات حركة الفواتير والعهد", "print_report": "🖨️ طباعة التقرير التنفيذي المعتمد (A3)",
         "analytics_scope": "نطاق التحليل:", "analytics_all": "الكل (جميع المشاريع)", "issue_date": "تاريخ الإصدار",
         "insights_title": "التحليل المالي والتوصيات التنفيذية",
         "insight_kicker": "توصية تنفيذية",
@@ -1262,8 +1679,53 @@ else:
     t = {
         "add_proj": "➕ Add New Project...", "proj_label": "Current Project:", "save_proj": "Save Project", "new_proj_name": "New Project Name:",
         "user_mgmt": "⚙️ User Management", "logout": "🚪 Logout", "user_mgmt_title": "👥 User Access & Permissions Control",
-        "tab_records": "📑 Invoice Register & Reconciliation", "tab_analytics": "📊 Project Analytics & KPIs", "tab_memory": "⚙️ System Policies & Controls",
-        "metric_in": "Total Inbound Funds ⬇️", "metric_out": "Total Expenses ↗️", "metric_bal": "Net Balance 💰", "metric_burn": "Burn Rate ⚡", "curr": "EGP",
+        "tab_records": "📑 Invoice Register & Reconciliation", "tab_custody_analytics": "📊 Custody & Expense Analytics", "tab_analytics": "📊 Project Analytics & KPIs", "tab_memory": "⚙️ System Policies & Controls",
+        "metric_in": "Inbound Receipts & Funding ⬇️", "metric_out": "Operating Payments & Expenses ↗️", "metric_bal": "Available Liquidity Balance 💰", "metric_burn": "Liquidity Burn Rate ⚡", "curr": "EGP",
+        "currency_label": "Currency:",
+        "files_first": "⚠️ Please select files first.",
+        "exec_status_surplus": "Cash surplus available",
+        "exec_status_deficit": "Liquidity shortfall requiring funding",
+        "exec_status_balanced": "Break-even position",
+        "exec_kpi_in_title": "Collected receipts",
+        "exec_kpi_in_sub": "Client certified invoice collections",
+        "exec_kpi_out_title": "Total payments",
+        "exec_kpi_out_sub": "Subcontractors, suppliers, and site costs",
+        "exec_kpi_net_title": "Net cash position",
+        "exec_kpi_net_sub": "Realized cash difference on the project",
+        "exec_coverage": "Coverage",
+        "exec_kpi_pending_title": "Invoices pending approval",
+        "exec_kpi_pending_sub": "Expected inflow under consultant review",
+        "exec_kpi_ret_title": "Retention receivable",
+        "exec_kpi_ret_sub": "Amounts held by the client until handover",
+        "exec_kpi_adv_title": "Remaining advance balance",
+        "exec_kpi_adv_sub": "Outstanding recovery obligation",
+        "exec_exposure_title": "Contractual exposure, retentions, and advance cycle",
+        "exec_advance_cycle": "Advance payment cycle",
+        "exec_adv_received": "Total advance received",
+        "exec_adv_recovered": "Amount recovered to date",
+        "exec_adv_remaining": "Remaining contractor obligation",
+        "exec_ret_section": "Works retention",
+        "exec_ret_client": "Retention held by the client",
+        "exec_ret_sub": "Retention withheld from subcontractors",
+        "exec_ret_gap": "Net retention gap",
+        "exec_outflow_section": "Actual outflow breakdown",
+        "exec_paid_sub": "Paid to subcontractors",
+        "exec_paid_mat": "Paid to material suppliers",
+        "exec_paid_site": "Site and petty expenses",
+        "exec_sub_due": "Unpaid subcontractor obligations",
+        "exec_chart_expense": "Construction cost and payment structure",
+        "exec_chart_forecast": "Near-term liquidity forecast",
+        "exec_no_expenses": "No outflow transactions are recorded for this project yet.",
+        "exec_lbl_subs": "Subcontractors",
+        "exec_lbl_mat": "Material suppliers",
+        "exec_lbl_site": "Site and labor expenses",
+        "exec_bar_in": "Expected inflow from invoices under approval",
+        "exec_bar_out": "Due unpaid subcontractor obligations",
+        "exec_bar_net": "Expected net cash flow",
+        "exec_horizon": "Next two weeks",
+        "exec_print_company": "Al Yosser General Contracting",
+        "exec_print_title": "Executive financial report: liquidity and risk control",
+        "exec_print_project": "Project",
         "filter_title": "🔍 Search & Filter Tools", "filter_cat": "📂 Category:", "filter_pay": "💳 Payment Method:", "filter_date": "📅 Period:",
         "all": "All", "today": "Today", "this_week": "This Week", "this_month": "This Month", "custom": "Custom Range", "from_date": "From:", "to_date": "To:",
         "no_records": "No matching records found to display.", "export_excel": "📥 Export to Excel (.xlsx)",
@@ -1290,11 +1752,12 @@ else:
         "pwd_btn": "🔑 Password", "del_proj_help": "Delete project", "confirm": "Confirm", "cancel": "Cancel",
         "proj_deleted": "Project deleted", "brand_fallback": "Al Yosser Engineering & Contracting",
         "role_super": "🛡️ Super Admin", "role_admin": "👑 Company Admin", "role_ceo": "💼 CEO", "role_acc": "📊 Accountant",
-        "assistant_title": "💼 Smart Financial Assistant", "assistant_info": "Live analysis for project:",
+        "assistant_title": "💼 Financial Assistant", "assistant_info": "Live analysis for project:",
         "assistant_you": "You", "assistant_bot": "Assistant",
         "assistant_placeholder": "Ask about this project's invoices and expenses...",
+        "assistant_send": "Send",
         "assistant_clear": "Clear chat 🗑️", "assistant_spinner": "Retrieving records and reviewing...",
-        "analytics_title": "📊 Project Analytics & Executive Summary", "print_report": "🖨️ Print Executive Report (A3)",
+        "analytics_title": "📊 Invoices & Custody Analytics", "print_report": "🖨️ Print Executive Report (A3)",
         "analytics_scope": "Analysis scope:", "analytics_all": "All Projects", "issue_date": "Issue date",
         "insights_title": "Financial Analysis & Executive Recommendations",
         "insight_kicker": "Executive insight",
@@ -1308,6 +1771,8 @@ else:
         "queue_info": "⏳ Review Queue: Document", "of_total": "of total",
         "calc_title": "🔢 Calculator", "calc_btn": "Calculate", "calc_res": "Result:"
     }
+
+t["curr"] = st.session_state.project_currency
 
 with st.sidebar:
     logo_path = os.path.join(BASE_DIR, "logo.PNG")
@@ -1335,13 +1800,13 @@ with st.sidebar:
         white-space: normal !important; line-height: 1.35 !important;
     }
     section[data-testid="stSidebar"] button[kind="primary"] {
-        background: linear-gradient(135deg, #2C3E50 0%, #1A2834 100%) !important;
-        border: 1.5px solid #E8B423 !important; color: #FFFFFF !important;
+        background: linear-gradient(135deg, #0A2540 0%, #005C8A 100%) !important;
+        border: 1.5px solid #0369A1 !important; color: #FFFFFF !important;
     }
     .sb-programs-title {
-        text-align: start; font-size: 18px; font-weight: 900; color: var(--text-title, #2C3E50);
+        text-align: start; font-size: 18px; font-weight: 900; color: var(--text-title, #0A2540);
         margin: 2px 0 12px 0; padding: 0 2px 8px 2px; letter-spacing: 0.01em; line-height: 1.35;
-        border-bottom: 3px solid #E8B423;
+        border-bottom: 3px solid #0284C7;
     }
     .sb-settings-title {
         text-align: start; font-size: 18px; font-weight: 800; color: var(--text-title, #2C3E50);
@@ -1382,12 +1847,20 @@ with st.sidebar:
     }
     .fin-info-card {
         background: #FFFFFF; color: #2C3E50; border-radius: 12px; padding: 10px 12px; margin-bottom: 10px;
-        border: 1px solid #E6D9A8; border-right: 4px solid #E8B423; font-size: 13px; font-weight: 700; line-height: 1.5;
+        border: 1px solid #D6E4EF; border-right: 4px solid #0284C7; font-size: 13px; font-weight: 700; line-height: 1.5;
         box-shadow: 0 2px 8px rgba(44, 62, 80, 0.05);
     }
     .fin-chat-wrap {
-        background: #FBF9F3; border: 1px solid #E6D9A8; border-radius: 12px; padding: 8px 8px 4px 8px;
-        margin-bottom: 8px;
+        background: #FBF9F3; border: 1px solid #E6D9A8; border-radius: 12px; padding: 8px;
+        margin-bottom: 8px; height: auto !important; max-height: 36vh; overflow-y: auto;
+    }
+    section[data-testid="stSidebar"] [data-testid="stExpander"] {
+        height: auto !important; max-height: none !important; overflow: visible !important;
+        margin-bottom: 8px !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stChatInput"],
+    section[data-testid="stSidebar"] [data-testid="stBottomBlockContainer"] {
+        position: static !important; height: auto !important;
     }
     .fin-user-bubble {
         background: #F7F4EC; color: #2C3E50; border: 1px solid #E6D9A8;
@@ -1410,8 +1883,8 @@ with st.sidebar:
     st.markdown(f'<div class="sb-programs-title">{t["programs_title"]}</div>', unsafe_allow_html=True)
     program_items = [
         ("custody", "🧾", t["prog_custody"], False),
-        ("subcontractor", "🏗️", t["prog_sub"], True),
-        ("client", "📑", t["prog_client"], True),
+        ("subcontractor", "🏗️", t["prog_sub"], False),
+        ("client", "📑", t["prog_client"], False),
         ("executive", "📊", t["prog_exec"], False),
     ]
     for key, icon, title, is_soon in program_items:
@@ -1421,8 +1894,6 @@ with st.sidebar:
             st.session_state.active_portal_module = key
             if key == "custody":
                 st.session_state.active_tab = "records"
-            elif key == "executive":
-                st.session_state.active_tab = "analytics"
             st.rerun()
         if is_soon:
             st.markdown(f'<div class="sb-program-meta">{t["coming_soon"]} — {t["in_prep"]}</div>', unsafe_allow_html=True)
@@ -1432,7 +1903,9 @@ with st.sidebar:
         st.markdown(f'<div class="sb-settings-title">{t["settings_title"]}</div>', unsafe_allow_html=True)
         lang_choice = st.radio(t["lang_label"], ["العربية", "English"], index=0 if st.session_state.system_lang == "العربية" else 1, horizontal=True)
         if lang_choice != st.session_state.system_lang:
-            st.session_state.system_lang = lang_choice; st.rerun()
+            st.session_state.system_lang = lang_choice
+            st.session_state.project_currency = normalize_project_currency(st.session_state.project_currency, lang_choice)
+            st.rerun()
 
         theme_options = [t["theme_light"], t["theme_dark"]]
         cur_th_idx = 0 if st.session_state.system_theme == "Light" else 1
@@ -1440,6 +1913,15 @@ with st.sidebar:
         new_theme = "Light" if theme_selected == t["theme_light"] else "Dark"
         if new_theme != st.session_state.system_theme:
             st.session_state.system_theme = new_theme; st.rerun()
+
+        currency_opts = currency_options_for_lang(st.session_state.system_lang)
+        current_currency = normalize_project_currency(st.session_state.project_currency, st.session_state.system_lang)
+        st.session_state.project_currency = current_currency
+        cur_idx = currency_opts.index(current_currency) if current_currency in currency_opts else 0
+        selected_currency = st.selectbox(t["currency_label"], currency_opts, index=cur_idx)
+        if selected_currency != st.session_state.project_currency:
+            st.session_state.project_currency = selected_currency
+            st.rerun()
 
     status_left = t["connected"] if api_key else t["disconnected"]
     st.markdown(f"""
@@ -1484,13 +1966,14 @@ with st.sidebar:
                 """, unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-        user_query = st.chat_input(t["assistant_placeholder"], key="assistant_chat_input")
-        if user_query:
-            st.session_state.chat_messages.append({"role": "user", "content": user_query})
+        user_query = st.text_input(t["assistant_placeholder"], key="assistant_text_in", label_visibility="collapsed")
+        send_assistant = st.button(t["assistant_send"], use_container_width=True, key="assistant_send_btn")
+        if send_assistant and str(user_query or "").strip():
+            st.session_state.chat_messages.append({"role": "user", "content": user_query.strip()})
             with st.spinner(t["assistant_spinner"]):
                 try:
                     ans = ask_project_assistant(
-                        user_query=user_query,
+                        user_query=user_query.strip(),
                         project_name=assistant_proj,
                         invoices_list=st.session_state.invoices_data,
                         rules_dict=st.session_state.system_dictionary,
@@ -1506,10 +1989,10 @@ with st.sidebar:
                 st.session_state.chat_messages = []
                 st.rerun()
 
-    st.divider()
-    with st.expander(t["calc_title"], expanded=False):
+        st.markdown("---")
+        st.caption(t["calc_title"])
         calc_expr = st.text_input(t["calc_expr"], value="", key="quick_calc_in")
-        if st.button(t["calc_btn"], use_container_width=True):
+        if st.button(t["calc_btn"], use_container_width=True, key="sidebar_calc_btn"):
             try:
                 clean_expr = re.sub(r'[^0-9\+\-\*\/\.\(\)\s]', '', calc_expr)
                 if clean_expr.strip():
@@ -1518,19 +2001,8 @@ with st.sidebar:
             except Exception:
                 st.error(t["calc_err"])
 
-if st.session_state.active_portal_module in ("subcontractor", "client"):
-    soon_map = {
-        "subcontractor": t["prog_sub"],
-        "client": t["prog_client"],
-    }
-    soon_title = soon_map.get(st.session_state.active_portal_module, t["coming_soon"])
-    st.markdown(f"""
-    <div style="max-width: 720px; margin: 48px auto; background: var(--bg-card, #FFFFFF); border: 1px solid var(--border-subtle, #E2E8F0); border-radius: 18px; padding: 36px 32px; text-align: center; box-shadow: 0 10px 28px rgba(15,37,69,0.08);">
-        <div style="display:inline-block; background:#F1F5F9; color:#0369A1; border:1px solid #BAE6FD; border-radius:999px; padding:4px 12px; font-size:12px; font-weight:800; margin-bottom:14px;">{t["coming_soon"]}</div>
-        <h2 style="margin: 0 0 8px 0; color: var(--text-title, #0F172A);">{soon_title}</h2>
-        <p style="margin: 0; color: var(--text-muted, #64748B); font-size: 15px; line-height: 1.7;">{t["soon_body"]}</p>
-    </div>
-    """, unsafe_allow_html=True)
+if st.session_state.active_portal_module == "client":
+    render_client_invoices_tab()
     st.stop()
 
 col_proj, col_proj_del, col_empty, col_user = st.columns([2.0, 0.5, 0.3, 2.2])
@@ -1677,6 +2149,249 @@ if (is_company_admin or is_ceo or is_super_admin) and st.session_state.show_user
 
 st.divider()
 
+if st.session_state.active_portal_module == "subcontractor":
+    from subcontractor_module import render_subcontractor_interface
+    render_subcontractor_interface(selected_proj, current_user_data, api_key)
+    st.stop()
+
+if st.session_state.active_portal_module == "executive":
+    # ─── 1. استدعاء البيانات المجمعة الموسعة ───
+    exec_data = get_project_executive_summary(selected_proj) or {}
+
+    cash_in = float(exec_data.get("total_cash_in", 0.0) or 0.0)
+    cash_out = float(exec_data.get("total_cash_out", 0.0) or 0.0)
+    net_flow = float(exec_data.get("net_cash_flow", 0.0) or 0.0)
+
+    sub_paid = float(exec_data.get("subcontractors_paid", 0.0) or 0.0)
+    mat_paid = float(exec_data.get("material_suppliers_paid", 0.0) or 0.0)
+    site_exp = float(exec_data.get("general_site_expenses", 0.0) or 0.0)
+
+    client_retention = float(exec_data.get("client_retention_receivable", 0.0) or 0.0)
+    sub_retention = float(exec_data.get("subcontractors_retention", 0.0) or 0.0)
+
+    adv_received = float(exec_data.get("advance_payment_received", 0.0) or 0.0)
+    adv_recovered = float(exec_data.get("advance_payment_recovered", 0.0) or 0.0)
+    adv_balance = float(exec_data.get("advance_payment_balance", 0.0) or 0.0)
+
+    pending_ipc = float(exec_data.get("client_pending_approval", 0.0) or 0.0)
+    sub_due = float(exec_data.get("subcontractors_balance_due", 0.0) or 0.0)
+
+    forecast_in = float(exec_data.get("short_term_forecast_inflow", 0.0) or 0.0)
+    forecast_out = float(exec_data.get("short_term_forecast_outflow", 0.0) or 0.0)
+    forecast_net = float(exec_data.get("short_term_forecast_net", 0.0) or 0.0)
+
+    issue_date_val = datetime.date.today().strftime("%Y-%m-%d")
+    proj_html = html.escape(str(selected_proj or ""))
+    curr_html = html.escape(str(st.session_state.project_currency))
+    title_html = html.escape(str(t.get("prog_exec", "")))
+    print_label = html.escape(str(t.get("print_report", "طباعة التقرير")))
+    issue_label = html.escape(str(t.get("issue_date", "تاريخ الإصدار")))
+    retention_gap = client_retention - sub_retention
+
+    # ─── 2. ضبط المؤشرات البصرية ودلالات الألوان ───
+    if net_flow > 0:
+        net_color = "#10B981"
+        status_text = t["exec_status_surplus"]
+    elif net_flow < 0:
+        net_color = "#EF4444"
+        status_text = t["exec_status_deficit"]
+    else:
+        net_color = "#38BDF8"
+        status_text = t["exec_status_balanced"]
+
+    coverage_ratio = (cash_in / cash_out * 100) if cash_out > 0 else 0.0
+
+    st.markdown("""
+    <style>
+    .exec-print-header { display: none !important; visibility: hidden !important; height: 0 !important; overflow: hidden !important; margin: 0 !important; padding: 0 !important; border: none !important; }
+    @media print {
+        @page { size: A3 landscape; margin: 10mm 12mm; }
+        html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"], .main, .block-container {
+            background: #FFFFFF !important; color: #2C3E50 !important;
+            overflow: visible !important; height: auto !important; max-width: 100% !important;
+            padding: 0 !important; margin: 0 !important;
+        }
+        header[data-testid="stHeader"],
+        [data-testid="stToolbar"],
+        [data-testid="stDecoration"],
+        [data-testid="stSidebar"],
+        [data-testid="stSidebarCollapsedControl"],
+        [data-testid="collapsedControl"],
+        [data-testid="stStatusWidget"],
+        [data-testid="stBottomBlockContainer"],
+        footer, #MainMenu, .stDeployButton, .stAppToolbar,
+        .no-print, .footer-container,
+        [data-testid="stExpander"],
+        [data-testid="stSelectbox"],
+        [data-testid="stIFrame"],
+        [data-testid="stInfo"],
+        [data-testid="stAlert"],
+        [data-testid="stDivider"],
+        .stButton, [data-testid="stButton"] {
+            display: none !important; visibility: hidden !important; height: 0 !important; width: 0 !important;
+            overflow: hidden !important;
+        }
+        body * { visibility: hidden !important; }
+        .exec-print-header, .exec-print-header *,
+        .print-keep, .print-keep *,
+        .kpi-card, .kpi-card *,
+        .print-chart-block, .print-chart-block *,
+        [data-testid="stPlotlyChart"], [data-testid="stPlotlyChart"] *,
+        .js-plotly-plot, .js-plotly-plot *, .plot-container, .plot-container *, .svg-container, .svg-container * {
+            visibility: visible !important;
+        }
+        [data-testid="stAppViewContainer"] { margin-left: 0 !important; }
+        section[data-testid="stSidebar"] { display: none !important; width: 0 !important; min-width: 0 !important; }
+        .exec-print-header {
+            display: block !important;
+            visibility: visible !important;
+            height: auto !important;
+            overflow: visible !important;
+            margin-bottom: 10px !important;
+            border-bottom: 3px solid #0284C7 !important;
+            padding-bottom: 8px !important;
+            page-break-after: avoid !important;
+        }
+        .kpi-card {
+            background: #E3F4FB !important; border: 1px solid #B7D7EA !important;
+            page-break-inside: avoid !important; break-inside: avoid !important;
+        }
+        .print-keep, .print-chart-block,
+        .js-plotly-plot, .plot-container, .svg-container,
+        [data-testid="stPlotlyChart"], [data-testid="stHorizontalBlock"] {
+            page-break-inside: avoid !important; break-inside: avoid-page !important;
+            overflow: visible !important;
+        }
+        [data-testid="stPlotlyChart"], .js-plotly-plot, .plot-container, .svg-container {
+            max-height: none !important; height: auto !important;
+        }
+        h2, h3, h4 { margin: 4px 0 6px 0 !important; page-break-after: avoid !important; }
+        * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # ─── 3. شريط العنوان وأمر الطباعة ───
+    col_title, col_print = st.columns([3.2, 1])
+    with col_title:
+        st.markdown(
+            f'<div class="section-banner no-print">📊 {title_html} — {proj_html}</div>',
+            unsafe_allow_html=True,
+        )
+    with col_print:
+        st.components.v1.html(
+            f"""
+            <button onclick="window.parent.print()" style="background: linear-gradient(135deg, #0A2540 0%, #005C8A 100%); color:white; padding:11px 16px; border:1px solid #0369A1; border-radius:12px; cursor:pointer; font-weight:800; font-size:13px; width:100%;">
+                🖨️ {print_label}
+            </button>
+            """,
+            height=50,
+        )
+
+    # ─── 4. ترويسة التقرير الرسمية للطباعة (تظهر في الطباعة فقط) ───
+    st.markdown(f"""
+    <div class="exec-print-header">
+        <h3 style="margin:0;">{html.escape(t["exec_print_company"])}</h3>
+        <h2 style="margin:6px 0 8px 0;">{html.escape(t["exec_print_title"])}</h2>
+        <p style="margin:0;font-weight:700;">{html.escape(t["exec_print_project"])}: {proj_html}</p>
+        <p style="margin:4px 0 0 0;">{issue_label}: {issue_date_val}</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ─── 5. شريط مؤشرات الرقابة والسيولة الشامل (6 بطاقات رئيسية) ───
+    st.markdown(f"""
+    <div class="print-keep" style="display:flex;gap:15px;margin-bottom:16px;flex-wrap:wrap;">
+        <div class="kpi-card">
+            <h5>{html.escape(t["exec_kpi_in_title"])}</h5>
+            <h3>{cash_in:,.2f} {curr_html}</h3>
+            <p style="margin:8px 0 0 0;font-size:12px;opacity:.8;">{html.escape(t["exec_kpi_in_sub"])}</p>
+        </div>
+        <div class="kpi-card">
+            <h5>{html.escape(t["exec_kpi_out_title"])}</h5>
+            <h3>{cash_out:,.2f} {curr_html}</h3>
+            <p style="margin:8px 0 0 0;font-size:12px;opacity:.8;">{html.escape(t["exec_kpi_out_sub"])}</p>
+        </div>
+        <div class="kpi-card">
+            <h5>{html.escape(t["exec_kpi_net_title"])}</h5>
+            <h3 style="color:{net_color} !important;">{net_flow:,.2f} {curr_html}</h3>
+            <p style="margin:8px 0 0 0;font-size:12px;opacity:.8;">{html.escape(t["exec_kpi_net_sub"])} · {html.escape(t["exec_coverage"])} {coverage_ratio:.1f}%</p>
+        </div>
+    </div>
+    <div class="print-keep" style="display:flex;gap:15px;margin-bottom:24px;flex-wrap:wrap;">
+        <div class="kpi-card">
+            <h5>{html.escape(t["exec_kpi_pending_title"])}</h5>
+            <h3>{pending_ipc:,.2f} {curr_html}</h3>
+            <p style="margin:8px 0 0 0;font-size:12px;opacity:.8;">{html.escape(t["exec_kpi_pending_sub"])}</p>
+        </div>
+        <div class="kpi-card">
+            <h5>{html.escape(t["exec_kpi_ret_title"])}</h5>
+            <h3>{client_retention:,.2f} {curr_html}</h3>
+            <p style="margin:8px 0 0 0;font-size:12px;opacity:.8;">{html.escape(t["exec_kpi_ret_sub"])}</p>
+        </div>
+        <div class="kpi-card">
+            <h5>{html.escape(t["exec_kpi_adv_title"])}</h5>
+            <h3>{adv_balance:,.2f} {curr_html}</h3>
+            <p style="margin:8px 0 0 0;font-size:12px;opacity:.8;">{html.escape(t["exec_kpi_adv_sub"])}</p>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ─── 6. لوحة تقييم الالتزامات والضمانات الإنشائية (Exposure & Retentions) ───
+    st.markdown(f"""
+    <div class="print-keep" style="border:1px solid #E2E8F0;border-radius:12px;padding:18px 20px;margin-bottom:22px;background:rgba(255,255,255,0.35);">
+        <h4 style="margin:0 0 10px 0;">🏗️ {html.escape(t["exec_exposure_title"])}</h4>
+        <p style="margin:0 0 14px 0;font-size:18px;font-weight:800;color:{net_color};">{html.escape(status_text)}</p>
+        <p style="margin:0 0 8px 0;"><b>💰 {html.escape(t["exec_advance_cycle"])}:</b></p>
+        <p style="margin:0 0 4px 18px;">• {html.escape(t["exec_adv_received"])}: <b>{adv_received:,.2f} {curr_html}</b></p>
+        <p style="margin:0 0 4px 18px;">• {html.escape(t["exec_adv_recovered"])}: <b>{adv_recovered:,.2f} {curr_html}</b></p>
+        <p style="margin:0 0 12px 18px;">• {html.escape(t["exec_adv_remaining"])}: <b>{adv_balance:,.2f} {curr_html}</b></p>
+        <p style="margin:0 0 8px 0;"><b>🔒 {html.escape(t["exec_ret_section"])}:</b></p>
+        <p style="margin:0 0 4px 18px;">• {html.escape(t["exec_ret_client"])}: <b>{client_retention:,.2f} {curr_html}</b></p>
+        <p style="margin:0 0 4px 18px;">• {html.escape(t["exec_ret_sub"])}: <b>{sub_retention:,.2f} {curr_html}</b></p>
+        <p style="margin:0 0 12px 18px;">• {html.escape(t["exec_ret_gap"])}: <b>{retention_gap:,.2f} {curr_html}</b></p>
+        <p style="margin:0 0 8px 0;"><b>📦 {html.escape(t["exec_outflow_section"])}:</b></p>
+        <p style="margin:0 0 4px 18px;">• {html.escape(t["exec_paid_sub"])}: <b>{sub_paid:,.2f} {curr_html}</b></p>
+        <p style="margin:0 0 4px 18px;">• {html.escape(t["exec_paid_mat"])}: <b>{mat_paid:,.2f} {curr_html}</b></p>
+        <p style="margin:0 0 0 18px;">• {html.escape(t["exec_paid_site"])}: <b>{site_exp:,.2f} {curr_html}</b></p>
+        <p style="margin:10px 0 0 0;font-size:12px;opacity:.85;">{html.escape(t["exec_sub_due"])}: <b>{sub_due:,.2f} {curr_html}</b></p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ─── 7. الرسوم البيانية: هيكل التكاليف + توقعات السيولة القادمة ───
+    col_chart1, col_chart2 = st.columns(2)
+
+    with col_chart1:
+        st.markdown('<div class="print-chart-block">', unsafe_allow_html=True)
+        st.markdown(f"### 🍩 {t['exec_chart_expense']}")
+        expense_labels = [t["exec_lbl_subs"], t["exec_lbl_mat"], t["exec_lbl_site"]]
+        expense_values = [sub_paid, mat_paid, site_exp]
+        if sum(expense_values) > 0:
+            fig_donut = px.pie(
+                values=expense_values,
+                names=expense_labels,
+                hole=0.45,
+                color_discrete_sequence=["#DC2626", "#F59E0B", "#3B82F6"],
+            )
+            fig_donut.update_layout(height=320, margin=dict(t=20, b=20, l=10, r=10), paper_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig_donut, use_container_width=True, config={"displayModeBar": False})
+        else:
+            st.info(t["exec_no_expenses"])
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with col_chart2:
+        st.markdown('<div class="print-chart-block">', unsafe_allow_html=True)
+        st.markdown(f"### 📈 {t['exec_chart_forecast']}")
+        fig_forecast = go.Figure(data=[
+            go.Bar(name=t["exec_bar_in"], x=[t["exec_horizon"]], y=[forecast_in], marker_color="#0284C7", text=[f"{forecast_in:,.0f}"], textposition="auto"),
+            go.Bar(name=t["exec_bar_out"], x=[t["exec_horizon"]], y=[forecast_out], marker_color="#EF4444", text=[f"{forecast_out:,.0f}"], textposition="auto"),
+            go.Bar(name=t["exec_bar_net"], x=[t["exec_horizon"]], y=[forecast_net], marker_color="#10B981" if forecast_net >= 0 else "#DC2626", text=[f"{forecast_net:,.0f}"], textposition="auto"),
+        ])
+        fig_forecast.update_layout(barmode="group", height=320, margin=dict(t=20, b=20, l=10, r=10), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig_forecast, use_container_width=True, config={"displayModeBar": False})
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.stop()
+
 project_invoices = [item for item in st.session_state.invoices_data if item.get("project") == selected_proj]
 active_project_invoices = [item for item in project_invoices if not item.get("delete", False)]
 
@@ -1685,26 +2400,36 @@ total_out = sum(item["amount"] for item in active_project_invoices if item["doc_
 balance = total_in - total_out
 burn_rate = (total_out / total_in * 100) if total_in > 0 else 0
 
-tabs_list = [t["tab_records"], t["tab_analytics"]]
+# ألسنة التبويبات المجمعة جهة اليمين
 if can_access_system_policies:
-    tabs_list.append(t["tab_memory"])
+    t_cols = st.columns([1.6, 2.2, 1.8, 4.4])
+else:
+    t_cols = st.columns([1.8, 2.4, 5.8])
 
-tab_cols = st.columns(len(tabs_list))
-for idx, tab_name in enumerate(tabs_list):
-    key_slug = "records" if idx == 0 else ("analytics" if idx == 1 else "memory")
-    with tab_cols[idx]:
-        if st.button(tab_name, use_container_width=True, type="primary" if st.session_state.active_tab == key_slug else "secondary"):
-            st.session_state.active_tab = key_slug; st.rerun()
+with t_cols[0]:
+    st.markdown('<span class="folder-tab-anchor"></span>', unsafe_allow_html=True)
+    if st.button(t["tab_records"], use_container_width=True, type="primary" if st.session_state.active_tab == "records" else "secondary", key="folder_tab_records"):
+        st.session_state.active_tab = "records"
+        st.rerun()
 
-st.markdown("<br>", unsafe_allow_html=True)
+with t_cols[1]:
+    if st.button(t["tab_custody_analytics"], use_container_width=True, type="primary" if st.session_state.active_tab == "analytics" else "secondary", key="folder_tab_analytics"):
+        st.session_state.active_tab = "analytics"
+        st.rerun()
+
+if can_access_system_policies:
+    with t_cols[2]:
+        if st.button(t["tab_memory"], use_container_width=True, type="primary" if st.session_state.active_tab == "memory" else "secondary", key="folder_tab_memory"):
+            st.session_state.active_tab = "memory"
+            st.rerun()
 
 if st.session_state.active_tab == "records":
     apply_pending_sync_results()
     st.markdown(f"""
     <div style='display: flex; gap: 15px; margin-bottom: 30px;'>
-        <div class="kpi-card"><h5>{t["metric_in"]}</h5><h3>{total_in:,.2f} {t["curr"]}</h3></div>
-        <div class="kpi-card"><h5>{t["metric_out"]}</h5><h3>{total_out:,.2f} {t["curr"]}</h3></div>
-        <div class="kpi-card"><h5>{t["metric_bal"]}</h5><h3>{balance:,.2f} {t["curr"]}</h3></div>
+        <div class="kpi-card"><h5>{t["metric_in"]}</h5><h3>{total_in:,.2f} {st.session_state.project_currency}</h3></div>
+        <div class="kpi-card"><h5>{t["metric_out"]}</h5><h3>{total_out:,.2f} {st.session_state.project_currency}</h3></div>
+        <div class="kpi-card"><h5>{t["metric_bal"]}</h5><h3>{balance:,.2f} {st.session_state.project_currency}</h3></div>
         <div class="kpi-card"><h5>{t["metric_burn"]}</h5><h3>{burn_rate:.1f}%</h3></div>
     </div>
     """, unsafe_allow_html=True)
@@ -1716,54 +2441,118 @@ if st.session_state.active_tab == "records":
                 {t['sec_reg']}
             </div>
             """, unsafe_allow_html=True)
-            
-            st.markdown("""
-            <style>
-            .st-key-doc_kind_out button, .st-key-doc_kind_in button {
-                min-height: 78px !important; border-radius: 12px !important; font-weight: 800 !important;
-                white-space: pre-line !important; line-height: 1.35 !important; font-size: 15px !important;
-            }
-            .st-key-doc_kind_out button[kind="primary"] { border: 2px solid #B91C1C !important; }
-            .st-key-doc_kind_in button[kind="primary"] { border: 2px solid #047857 !important; }
-            div[data-testid="stFileUploader"] { min-height: 120px; }
-            </style>
-            """, unsafe_allow_html=True)
-            kind_out = st.session_state.upload_doc_kind == "out"
-            kind_in = not kind_out
-            is_inbound = kind_in
 
-            if is_rtl:
-                col_type, col_input = st.columns([1.05, 1.55], gap="medium")
-            else:
-                col_input, col_type = st.columns([1.55, 1.05], gap="medium")
+            with st.container():
+                if is_rtl:
+                    kind_options = [
+                        "🔴 منصرف (فواتير وإيصالات صرف)",
+                        "🟢 وارد (سندات قبض وتمويل)",
+                    ]
+                    kind_label = "نوع الحركة المالية:"
+                    file_label = "اسحب المستندات وأفلتها هنا أو انقر للاختيار (PDF أو صور):"
+                    file_help = "يدعم السحب والإفلات، التصفح المباشر، وملفات الـ PDF والصور المتعددة حتى 200MB"
+                    paste_hint = "يمكنك أيضاً الضغط على Ctrl+V للصق صورة من الحافظة، أو سحب الملف وإفلاته مباشرة."
+                else:
+                    kind_options = [
+                        f"{t['out_opt']} ({t['out_opt_sub']})",
+                        f"{t['in_opt']} ({t['in_opt_sub']})",
+                    ]
+                    kind_label = f"{t['doc_type_prompt']}:"
+                    file_label = t["choose_files"]
+                    file_help = "Drag and drop, browse, and paste images. PDF and images up to 200MB."
+                    paste_hint = "You can also press Ctrl+V to paste an image, or drag a file onto the box."
 
-            with col_type:
-                st.caption(t["doc_type_prompt"])
-                if st.button(f"{t['out_opt']}\n{t['out_opt_sub']}", use_container_width=True, type="primary" if kind_out else "secondary", key="doc_kind_out"):
-                    st.session_state.upload_doc_kind = "out"
-                    st.rerun()
-                if st.button(f"{t['in_opt']}\n{t['in_opt_sub']}", use_container_width=True, type="primary" if kind_in else "secondary", key="doc_kind_in"):
-                    st.session_state.upload_doc_kind = "in"
-                    st.rerun()
+                col_kind, col_upload, col_action = st.columns([1.2, 2.8, 1.2], gap="medium")
 
-            with col_input:
-                upload_tab1, upload_tab2 = st.tabs([t["tab_upload"], t["tab_paste"]])
-                main_files = []
-                with upload_tab1:
-                    uploaded = st.file_uploader(t["choose_files"], type=['jpg', 'png', 'jpeg', 'pdf'], accept_multiple_files=True, label_visibility="collapsed")
-                    if uploaded: main_files.extend(uploaded)
-                with upload_tab2:
-                    pasted_img = st.file_uploader(t["paste_hint"], type=['png', 'jpg', 'jpeg'], key="paste_uploader", label_visibility="collapsed")
-                    if pasted_img: main_files.append(pasted_img)
-                if st.button(t["start_process"], type="primary", use_container_width=True):
-                    if not api_key: st.error(t["api_disc"])
-                    elif not main_files: st.warning("⚠️ Please select files first.")
+                with col_kind:
+                    doc_kind_selected = st.selectbox(
+                        kind_label,
+                        kind_options,
+                        index=0 if st.session_state.upload_doc_kind == "out" else 1,
+                        key="styled_doc_kind_select" if is_rtl else "styled_doc_kind_select_en",
+                    )
+                    st.session_state.upload_doc_kind = "out" if doc_kind_selected == kind_options[0] else "in"
+                    is_inbound = (st.session_state.upload_doc_kind == "in")
+                    st.markdown(f'<div class="upload-paste-hint">{paste_hint}</div>', unsafe_allow_html=True)
+
+                with col_upload:
+                    st.markdown('<span class="invoice-drop-anchor"></span>', unsafe_allow_html=True)
+                    main_files = st.file_uploader(
+                        file_label,
+                        type=["jpg", "png", "jpeg", "pdf"],
+                        accept_multiple_files=True,
+                        key="unified_file_uploader",
+                        help=file_help,
+                    )
+
+                with col_action:
+                    start_trigger = st.button(
+                        "🚀 " + t["start_process"],
+                        type="primary",
+                        use_container_width=True,
+                        key="btn_start_extract_proc",
+                    )
+
+                st.html(
+                    """
+                    <div id="invoice-paste-hook"></div>
+                    <script>
+                    (function () {
+                      const root = document.documentElement;
+                      if (root.dataset.invoicePasteBound === "1") return;
+                      root.dataset.invoicePasteBound = "1";
+                      document.addEventListener("paste", function (event) {
+                        const active = document.activeElement;
+                        const tag = active && active.tagName;
+                        if (tag === "INPUT" || tag === "TEXTAREA" || (active && active.isContentEditable)) {
+                          if (!active || active.type !== "file") return;
+                        }
+                        const items = (event.clipboardData && event.clipboardData.items) || [];
+                        const images = [];
+                        for (let i = 0; i < items.length; i++) {
+                          if (items[i].type && items[i].type.indexOf("image/") === 0) {
+                            const file = items[i].getAsFile();
+                            if (file) images.push(file);
+                          }
+                        }
+                        if (!images.length) return;
+                        const anchor = document.querySelector(".invoice-drop-anchor");
+                        const column = anchor && anchor.closest('[data-testid="stColumn"]');
+                        const input = (column && column.querySelector('input[type="file"]'))
+                          || document.querySelector('[data-testid="stFileUploaderDropzone"] input[type="file"]');
+                        if (!input || typeof DataTransfer === "undefined") return;
+                        event.preventDefault();
+                        const transfer = new DataTransfer();
+                        if (input.multiple && input.files) {
+                          for (let i = 0; i < input.files.length; i++) transfer.items.add(input.files[i]);
+                        }
+                        images.forEach(function (file, index) {
+                          const ext = (file.type.split("/")[1] || "png").replace("jpeg", "jpg");
+                          const name = (file.name && file.name !== "image.png")
+                            ? file.name
+                            : ("clipboard-" + Date.now() + "-" + index + "." + ext);
+                          transfer.items.add(new File([file], name, { type: file.type || "image/png" }));
+                        });
+                        input.files = transfer.files;
+                        input.dispatchEvent(new Event("change", { bubbles: true }));
+                      });
+                    })();
+                    </script>
+                    """,
+                    unsafe_allow_javascript=True,
+                )
+
+                if start_trigger:
+                    if not api_key:
+                        st.error(t["api_disc"])
+                    elif not main_files:
+                        st.warning(t["files_first"])
                     else:
                         with st.spinner(t["process_spinner"]):
                             st.session_state.invoice_queue = []
                             for file in main_files:
                                 file_bytes = file.read()
-                                if file.name.lower().endswith('.pdf'):
+                                if file.name.lower().endswith(".pdf"):
                                     doc = fitz.open(stream=file_bytes, filetype="pdf")
                                     for i in range(len(doc)):
                                         page = doc.load_page(i)
@@ -1782,7 +2571,8 @@ if st.session_state.active_tab == "records":
                                         bot_dark = sum(1 for p in bot_vals if p < 160)
                                         if top_dark == 0 and bot_dark > 20:
                                             img = img.rotate(180, expand=True)
-                                        st.session_state.invoice_queue.append({"image": img, "name": f"{file.name} - p{i+1}"})
+                                        st.session_state.invoice_queue.append({"image": img, "name": f"{file.name} - ص{i+1}"})
+                                    doc.close()
                                 else:
                                     img = Image.open(io.BytesIO(file_bytes))
                                     st.session_state.invoice_queue.append({"image": img, "name": file.name})
@@ -1811,7 +2601,7 @@ if st.session_state.active_tab == "records":
 قواعد الشركة وقاموس الموردين: {rules}
 المشروع الحالي: {selected_proj}
 المطلوب استخراج الحقول بدقة ومطابقة التفقيط بالأرقام."""
-                        st.session_state.pending_invoice = analyze_invoice_with_gemini(current_item["image"], prompt, api_key, current_project=selected_proj)
+                        st.session_state.pending_invoice = analyze_invoice_with_gemini(current_item["image"], prompt, api_key, current_project=selected_proj, module_type="custody")
                         st.rerun()
                     except Exception as e:
                         st.error(f"⚠️ خطأ أثناء الاستخراج: {e}")
@@ -1838,7 +2628,7 @@ if st.session_state.active_tab == "records":
                 
                 c3, c4 = st.columns(2)
                 with c3:
-                    amount = st.number_input(f"{t['col_amount']} ({t['curr']})", value=float(data.get("amount", 0.0)))
+                    amount = st.number_input(f"{t['col_amount']} ({st.session_state.project_currency})", value=float(data.get("amount", 0.0)))
                 with c4: 
                     vat = st.number_input(t["col_vat"], value=float(data.get("vat", 0.0)))
                 
@@ -1862,7 +2652,7 @@ if st.session_state.active_tab == "records":
                 if duplicate_found:
                     st.markdown(f"""
                     <div class="duplicate-warning-box">
-                        ⚠️ تنبيه تكرار: المستند رقم ({clean_inv_no}) بمبلغ ({amount:,.2f} {t['curr']}) مسجل مسبقاً في الحركة رقم ({duplicate_found[0]}).
+                        ⚠️ تنبيه تكرار: المستند رقم ({clean_inv_no}) بمبلغ ({amount:,.2f} {st.session_state.project_currency}) مسجل مسبقاً في الحركة رقم ({duplicate_found[0]}).
                     </div>
                     """, unsafe_allow_html=True)
                 
@@ -1908,6 +2698,8 @@ if st.session_state.active_tab == "records":
                                 pass
                             approved_ds = load_approved_dataset()
                             approved_ds.insert(0, {
+                                "id": str(uuid.uuid4()),
+                                "module_type": "custody",
                                 "timestamp": str(datetime.datetime.now()),
                                 "company_id": st.session_state.tuning_config.get("company_id", "alyoser_contracting"),
                                 "input_doc": current_item["name"],
@@ -2019,7 +2811,7 @@ if st.session_state.active_tab == "records":
 
     if st.session_state.confirm_delete_id and can_delete_records:
         target_inv = next((x for x in active_project_invoices if x.get("serial_no") == st.session_state.confirm_delete_id), None)
-        desc_info = f"({target_inv['description']} - {target_inv['amount']:,.2f} {t['curr']})" if target_inv else ""
+        desc_info = f"({target_inv['description']} - {target_inv['amount']:,.2f} {st.session_state.project_currency})" if target_inv else ""
         st.markdown(f"""
         <div style='background-color: var(--kpi-outflow-bg); padding: 18px; border-radius: 10px; border: 2px solid #DC2626; margin-bottom: 20px;'>
             <h4 style='color: #DC2626; margin: 0 0 10px 0;'>🚨 تأكيد الحذف النهائي</h4>
@@ -2145,7 +2937,7 @@ elif st.session_state.active_tab == "analytics":
     .analytics-title {{ margin: 0 0 4px 0; color: #2C3E50; font-size: 22px; font-weight: 800; text-align: {align_css}; }}
     .analytics-date {{ color: var(--text-muted, #64748B); font-size: 13px; font-weight: 700; text-align: {align_css}; margin-top: 2px; }}
     .exec-insight-card {{
-        background: var(--bg-card, #FFFFFF); border: 1px solid #E6D9A8; border-{ 'right' if is_rtl else 'left' }: 4px solid #E8B423;
+        background: var(--bg-card, #FFFFFF); border: 1px solid #D6E4EF; border-{ 'right' if is_rtl else 'left' }: 4px solid #0284C7;
         border-radius: 12px; padding: 16px 18px; min-height: 170px; text-align: {align_css}; direction: {page_dir};
         box-shadow: 0 4px 14px rgba(44,62,80,0.06);
     }}
@@ -2159,7 +2951,7 @@ elif st.session_state.active_tab == "analytics":
     .audit-table {{ width: 100%; border-collapse: collapse; direction: {page_dir}; text-align: {align_css}; }}
     .audit-table th {{
         background: #2C3E50; color: #FFFFFF; padding: 10px 12px; font-size: 13px; font-weight: 800;
-        text-align: {align_css}; border-bottom: 2px solid #E8B423;
+        text-align: {align_css}; border-bottom: 2px solid #0284C7;
     }}
     .audit-table td {{
         padding: 9px 12px; border-bottom: 1px solid #E6D9A8; font-size: 12.5px; text-align: {align_css};
@@ -2215,7 +3007,7 @@ elif st.session_state.active_tab == "analytics":
         }}
         [data-testid="stAppViewContainer"] {{ margin-left: 0 !important; }}
         section[data-testid="stSidebar"] {{ display: none !important; width: 0 !important; min-width: 0 !important; }}
-        .print-only-header {{ display: block !important; margin-bottom: 10px !important; border-bottom: 3px solid #E8B423; padding-bottom: 8px; page-break-after: avoid !important; }}
+        .print-only-header {{ display: block !important; margin-bottom: 10px !important; border-bottom: 3px solid #0284C7; padding-bottom: 8px; page-break-after: avoid !important; }}
         .analytics-wrap {{ direction: {page_dir} !important; text-align: {align_css} !important; }}
         .kpi-card {{
             background: #E3F4FB !important; border: 1px solid #B7D7EA !important;
@@ -2257,7 +3049,7 @@ elif st.session_state.active_tab == "analytics":
         st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
         st.markdown('<div class="no-print">', unsafe_allow_html=True)
         st.components.v1.html(f"""
-        <button onclick="window.parent.print()" style="background: linear-gradient(135deg, #2C3E50 0%, #1A2834 100%); color:white; padding:11px 16px; border:1px solid #E8B423; border-radius:10px; cursor:pointer; font-weight:800; font-size:13px; width:100%;">
+        <button onclick="window.parent.print()" style="background: linear-gradient(135deg, #0A2540 0%, #005C8A 100%); color:white; padding:11px 16px; border:1px solid #0369A1; border-radius:12px; cursor:pointer; font-weight:800; font-size:13px; width:100%;">
             {t['print_report']}
         </button>
         """, height=50)
@@ -2298,9 +3090,9 @@ elif st.session_state.active_tab == "analytics":
 
     st.markdown(f"""
     <div class="kpi-container" style='display: flex; gap: 15px; margin: 8px 0 20px 0; direction:{page_dir};'>
-        <div class="kpi-card"><h5>{t["metric_in"]}</h5><h3>{a_total_in:,.2f} {t["curr"]}</h3></div>
-        <div class="kpi-card"><h5>{t["metric_out"]}</h5><h3>{a_total_out:,.2f} {t["curr"]}</h3></div>
-        <div class="kpi-card"><h5>{t["metric_bal"]}</h5><h3>{a_balance:,.2f} {t["curr"]}</h3></div>
+        <div class="kpi-card"><h5>{t["metric_in"]}</h5><h3>{a_total_in:,.2f} {st.session_state.project_currency}</h3></div>
+        <div class="kpi-card"><h5>{t["metric_out"]}</h5><h3>{a_total_out:,.2f} {st.session_state.project_currency}</h3></div>
+        <div class="kpi-card"><h5>{t["metric_bal"]}</h5><h3>{a_balance:,.2f} {st.session_state.project_currency}</h3></div>
         <div class="kpi-card"><h5>{t["metric_burn"]}</h5><h3>{a_burn_rate:.1f}%</h3></div>
     </div>
     """, unsafe_allow_html=True)
@@ -2384,14 +3176,14 @@ elif st.session_state.active_tab == "analytics":
         cash_pct = (cash_amt / a_total_out * 100) if a_total_out > 0 else 0
 
         if is_rtl:
-            cost_body = f"يمثل بند <b>({top_cat})</b> أعلى معدل استنزاف نقدي في نطاق التحليل بإجمالي <b>{top_cat_amt:,.2f} {t['curr']}</b> وبنسبة <b>{top_cat_pct:.1f}%</b> من إجمالي المنصرف."
+            cost_body = f"يمثل بند <b>({top_cat})</b> أعلى معدل استنزاف نقدي في نطاق التحليل بإجمالي <b>{top_cat_amt:,.2f} {st.session_state.project_currency}</b> وبنسبة <b>{top_cat_pct:.1f}%</b> من إجمالي المنصرف."
             cost_rec = "مراجعة أوامر التوريد ومطابقة المستخلصات الدورية للبند للتحقق من كفاءة التسعير والكميات."
-            cash_body = f"تبلغ نسبة السداد النقدي المباشر <b>{cash_pct:.1f}%</b> بإجمالي <b>{cash_amt:,.2f} {t['curr']}</b>."
+            cash_body = f"تبلغ نسبة السداد النقدي المباشر <b>{cash_pct:.1f}%</b> بإجمالي <b>{cash_amt:,.2f} {st.session_state.project_currency}</b>."
             cash_rec = "الاعتماد المستمر على الشيكات والتحويلات البنكية الموثقة لإحكام الرقابة وتأكيد التسليم المباشر للموردين والمقاولين."
         else:
-            cost_body = f"The item <b>({top_cat})</b> is the highest cash drain in this scope, totaling <b>{top_cat_amt:,.2f} {t['curr']}</b> ({top_cat_pct:.1f}% of expenses)."
+            cost_body = f"The item <b>({top_cat})</b> is the highest cash drain in this scope, totaling <b>{top_cat_amt:,.2f} {st.session_state.project_currency}</b> ({top_cat_pct:.1f}% of expenses)."
             cost_rec = "Review supply orders and periodic certificates for this item to verify pricing and quantity efficiency."
-            cash_body = f"Direct cash payments represent <b>{cash_pct:.1f}%</b>, totaling <b>{cash_amt:,.2f} {t['curr']}</b>."
+            cash_body = f"Direct cash payments represent <b>{cash_pct:.1f}%</b>, totaling <b>{cash_amt:,.2f} {st.session_state.project_currency}</b>."
             cash_rec = "Continue using documented cheques and bank transfers to tighten control and confirm direct settlement with vendors."
 
         st.markdown(f"<h3 class='print-keep' style='text-align:{align_css}; margin-top:12px;'>{t['insights_title']}</h3>", unsafe_allow_html=True)
@@ -2454,175 +3246,292 @@ elif st.session_state.active_tab == "analytics":
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ═════════════════════════════════════════════════════════════════════════
-# ─── تبويب سياسات وضوابط النظام المحدث (In-App Tuning & Prompt Controls) ───
+# ─── تبويب سياسات وضوابط النظام (التصميم المؤسسي الموحد - Super Admin) ───
 # ═════════════════════════════════════════════════════════════════════════
-elif st.session_state.active_tab == "memory" and can_access_system_policies:
-    if not st.session_state.memory_unlocked:
-        st.warning("🔒 التحقق الإداري مطلوب للدخول إلى مركز التحكم بالسياسات.")
-        passcode = st.text_input("رمز الأمان الإداري:", type="password")
-        if st.button("تأكيد الصلاحية 🗝️", type="primary"):
-            if passcode == "6114": 
-                st.session_state.memory_unlocked = True
-                st.rerun()
-            else: st.error("رمز الأمان غير صحيح!")
-    else:
-        st.markdown(f"""
-        <div class="section-banner">
-            {t['tab_memory']}
+elif st.session_state.active_tab == "memory" and (user_role == "Super Admin"):
+    _mem_title = html.escape(str(t["tab_memory"]))
+    _mem_proj = html.escape(str(selected_proj))
+    st.markdown(f"""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700;800&display=swap');
+    .memory-policies-root, .memory-policies-root *,
+    .stApp [data-testid="stVerticalBlock"]:has(.memory-policies-root),
+    .stApp [data-testid="stVerticalBlock"]:has(.memory-policies-root) * {{
+        font-family: 'IBM Plex Sans Arabic', sans-serif !important;
+    }}
+    .stApp [data-testid="stVerticalBlock"]:has(.memory-policies-root) {{
+        direction: rtl !important;
+        text-align: right !important;
+    }}
+    .stApp [data-testid="stVerticalBlock"]:has(.memory-policies-root) button[kind="primary"] {{
+        background: linear-gradient(135deg, #0A2540 0%, #005C8A 100%) !important;
+        border: 1px solid #0369A1 !important;
+        color: #FFFFFF !important;
+        font-family: 'IBM Plex Sans Arabic', sans-serif !important;
+        font-weight: 700 !important;
+    }}
+    .stApp [data-testid="stVerticalBlock"]:has(.memory-policies-root) button[kind="secondary"] {{
+        background: #FFFFFF !important;
+        border: 1px solid #0A2540 !important;
+        color: #0A2540 !important;
+        font-family: 'IBM Plex Sans Arabic', sans-serif !important;
+        font-weight: 700 !important;
+    }}
+    .stApp [data-testid="stVerticalBlock"]:has(.memory-policies-root) [data-testid="stTextInput"] input,
+    .stApp [data-testid="stVerticalBlock"]:has(.memory-policies-root) [data-testid="stTextArea"] textarea,
+    .stApp [data-testid="stVerticalBlock"]:has(.memory-policies-root) [data-baseweb="select"],
+    .stApp [data-testid="stVerticalBlock"]:has(.memory-policies-root) [data-baseweb="input"] {{
+        border: 1px solid #0369A1 !important;
+        font-family: 'IBM Plex Sans Arabic', sans-serif !important;
+        direction: rtl !important;
+        text-align: right !important;
+    }}
+    .stApp [data-testid="stVerticalBlock"]:has(.memory-policies-root) [data-testid="stTextInput"] input:focus,
+    .stApp [data-testid="stVerticalBlock"]:has(.memory-policies-root) [data-testid="stTextArea"] textarea:focus {{
+        border-color: #0284C7 !important;
+        box-shadow: 0 0 0 1px #0284C7 !important;
+    }}
+    .memory-kpi-strip {{
+        display: flex; gap: 15px; margin-bottom: 24px;
+        direction: rtl; font-family: 'IBM Plex Sans Arabic', sans-serif;
+    }}
+    .memory-kpi-strip .kpi-card small {{
+        display: block; margin-top: 6px; font-size: 12px; font-weight: 600;
+        color: var(--text-muted, #64748B);
+    }}
+    </style>
+    <div class="memory-policies-root section-banner">
+        ⚙️ {_mem_title} — {_mem_proj}
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ─── 1. شريط المؤشرات الإحصائية لذاكرة النظام ───
+    approved_ds = load_approved_dataset()
+    count_custody = len([d for d in approved_ds if d.get("module_type", "custody") == "custody"])
+    count_sub = len([d for d in approved_ds if d.get("module_type") == "subcontractor"])
+    count_client = len([d for d in approved_ds if d.get("module_type") == "client"])
+    total_samples = len(approved_ds)
+
+    st.markdown(f"""
+    <div class="memory-kpi-strip">
+        <div class="kpi-card">
+            <h5>إجمالي الذاكرة المعرفية</h5>
+            <h3>{total_samples}</h3>
+            <small>عينة استرشادية معتمدة</small>
         </div>
-        """, unsafe_allow_html=True)
-        if st.button("🔒 قفل الصلاحية", type="secondary"): 
-            st.session_state.memory_unlocked = False
-            st.rerun()
-        
-        t_tab1, t_tab2, t_tab3 = st.tabs([
-            "1️⃣ ضوابط التوجيه والقيد", 
-            "2️⃣ مستودع القيود والعينات المعتمدة", 
-            "3️⃣ ضبط وتحديث نماذج الاستخراج"
-        ])
-        
-        curr_cfg = st.session_state.tuning_config
-        
-        # ─── القسم الأول: ضوابط التوجيه المالي والقيد ───
-        with t_tab1:
-            st.subheader("🏢 تخصيص سياسات التوجيه المحاسبي للمشروع")
-            p_col1, p_col2 = st.columns(2)
-            c_name_val = p_col1.text_input("اسم الشركة / المنشأة المعتمدة:", value=curr_cfg.get("company_name", "شركة اليسر للمقاولات"))
-            c_id_val = p_col2.text_input("معرّف الشركة (Company ID):", value=curr_cfg.get("company_id", "alyoser_contracting"))
-            
-            st.markdown("**التوجيه المحاسبي الأساسي (System Instruction):**")
-            sys_inst_val = st.text_area(
-                "نص التوجيه المالي المعتمد في عمليات التدقيق:",
-                value=curr_cfg.get("system_instruction", ""),
-                height=120
-            )
-            
-            st.markdown("**قاموس المصطلحات والموردين المعتمد:**")
-            new_dict = st.text_area("قواعد التصنيف وأسماء الموردين المعتمدة:", value=st.session_state.system_dictionary, height=150)
-            
-            st.markdown("**قالب الاستخراج الإلزامي (Mandatory JSON Schema):**")
-            schema_json_str = st.text_area(
-                "هيكل مخرجات الحقول:",
-                value=json.dumps(curr_cfg.get("json_schema", {}), ensure_ascii=False, indent=2),
-                height=160
-            )
-            
-            if st.button("💾 حفظ السياسات وضوابط الاستخراج", type="primary"):
-                try:
-                    parsed_sch = json.loads(schema_json_str)
-                    curr_cfg["company_name"] = c_name_val
-                    curr_cfg["company_id"] = c_id_val
-                    curr_cfg["system_instruction"] = sys_inst_val
-                    curr_cfg["json_schema"] = parsed_sch
-                    save_tuning_config(curr_cfg)
-                    st.session_state.tuning_config = curr_cfg
-                    
-                    st.session_state.system_dictionary = new_dict
-                    local_ok, cloud_ok = save_system_dictionary(new_dict)
-                    
-                    st.success("✅ تم حفظ السياسات وضوابط القاموس بنجاح!")
-                except Exception as ex:
-                    st.error(f"خطأ في صيغة الـ JSON: {ex}")
+        <div class="kpi-card">
+            <h5>فواتير وعهد الموقع</h5>
+            <h3>{count_custody}</h3>
+            <small>نماذج صرف وتدقيق</small>
+        </div>
+        <div class="kpi-card">
+            <h5>مقاولو الباطن</h5>
+            <h3>{count_sub}</h3>
+            <small>حصر ومستخلصات جارية</small>
+        </div>
+        <div class="kpi-card">
+            <h5>مستخلصات العميل</h5>
+            <h3>{count_client}</h3>
+            <small>مطابقة كميات واعتمادات</small>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-        # ─── القسم الثاني: مستودع القيود والعينات المعتمدة ───
-        with t_tab2:
-            st.subheader("🔄 مستودع القيود والعينات المعتمدة (Ground Truth Dataset)")
-            approved_ds = load_approved_dataset()
-            ds_count = len(approved_ds)
-            
-            ready_color = "#10B981" if ds_count >= 10 else "#F59E0B"
-            st.markdown(f"""
-            <div style='display:flex; justify-content:space-between; align-items:center; background:var(--bg-card); padding:15px; border-radius:8px; border:1px solid var(--border-subtle); margin-bottom:15px;'>
-                <div>
-                    <h4 style='margin:0; color:var(--text-title);'>إجمالي القيود المعتمدة: <b>{ds_count}</b></h4>
-                    <small style='color:var(--text-muted);'>الحد الموصى به لضبط دقة التعرف التلقائي هو 10 عينات موثقة بكامل بياناتها.</small>
-                </div>
-                <div style='font-size:22px; font-weight:900; color:{ready_color};'>
-                    {'اكتمال النصاب الموصى به ✅' if ds_count >= 10 else f'متبقي {10 - ds_count} عينات ⏳'}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            if approved_ds:
-                preview_list = []
-                for idx, sample in enumerate(approved_ds):
-                    gt = sample.get("ground_truth", {})
-                    preview_list.append({
-                        "م": idx + 1,
-                        "المستند": sample.get("input_doc", ""),
-                        "تاريخ الفاتورة": gt.get("invoice_date", ""),
-                        "رقم المستند": gt.get("invoice_no", ""),
-                        "التصنيف": gt.get("category", ""),
-                        "البيان": gt.get("description", ""),
-                        "طريقة الدفع": gt.get("payment_method", ""),
-                        "المبلغ": f"{float(gt.get('amount', 0.0)):,.2f} ج.م",
-                        "الضريبة": f"{float(gt.get('vat', 0.0)):,.2f} ج.م",
-                        "الملاحظات": gt.get("remark", "")
-                    })
-                st.dataframe(pd.DataFrame(preview_list), use_container_width=True)
-                
-                col_c1, col_c2 = st.columns([2, 1])
-                if col_c2.button("🗑️ مسح مستودع العينات المعتمدة", use_container_width=True):
-                    save_approved_dataset([])
-                    st.session_state.approved_dataset = []
-                    st.session_state.manual_training_data = []
-                    save_training_db([])
-                    st.toast("تم مسح مستودع العينات!", icon="🧹")
-                    time.sleep(0.5); st.rerun()
-            else:
-                st.info("لم يتم توثيق قيود بعد. عند اعتماد وحفظ أي فاتورة جديدة سيتم تسجيلها هنا تلقائياً لضبط دقة النظام.")
+    t_tab1, t_tab2, t_tab3 = st.tabs([
+        "1️⃣ ضوابط وتوجيهات التدقيق",
+        "2️⃣ مستودع العينات المعتمدة",
+        "3️⃣ التوجيه الذكي وقاموس المصطلحات"
+    ])
 
-        # ─── القسم الثالث: محرك ضبط وتحديث نماذج الاستخراج ───
-        with t_tab3:
-            st.subheader("⚡ محرك ضبط نماذج الاستخراج (In-App Tuning Engine)")
-            
-            col_t1, col_t2 = st.columns(2)
-            active_model_in = col_t1.text_input("معرّف النموذج المخصص (Custom Model ID):", value=curr_cfg.get("active_tuned_model", ""), placeholder="tunedModels/alyoser-invoice-v1")
-            use_tuned_chk = col_t2.checkbox("تفعيل توجيه القراءات تلقائياً للنموذج المخصص", value=curr_cfg.get("use_tuned_model", False))
-            
-            if st.button("حفظ إعدادات توجيه النموذج المخصص 💾"):
-                curr_cfg["active_tuned_model"] = active_model_in.strip()
-                curr_cfg["use_tuned_model"] = use_tuned_chk
+    curr_cfg = st.session_state.tuning_config
+
+    # ─── القسم الأول: ضوابط وتوجيهات التدقيق ───
+    with t_tab1:
+        st.subheader("🏢 تخصيص سياسات التدقيق المحاسبي للمشاريع")
+
+        col_c1, col_c2 = st.columns(2)
+        with col_c1:
+            c_name_val = st.text_input("اسم المنشأة / الشركة المعتمدة:", value=curr_cfg.get("company_name", "شركة اليسر للمقاولات"))
+        with col_c2:
+            c_id_val = st.text_input("معرّف المنشأة في النظام:", value=curr_cfg.get("company_id", "alyoser_contracting"))
+
+        module_choice = st.radio(
+            "اختر الوحدة لضبط سياسات التدقيق والاستخراج الخاصة بها:",
+            ["فواتير ومصروفات العهد", "مستخلصات مقاولي الباطن", "مستخلصات العميل والمقايسة"],
+            horizontal=True
+        )
+
+        schemas = curr_cfg.get("schemas", {})
+        if not isinstance(schemas, dict):
+            schemas = {}
+
+        if module_choice == "فواتير ومصروفات العهد":
+            curr_inst = curr_cfg.get("inst_custody", "أنت مراجع مالي معتمد. مهمتك استخراج ومطابقة بيانات إيصالات وفواتير العهد والمصروفات بدقة ومطابقة التفقيط.")
+            curr_schema = schemas.get("custody", {
+                "invoice_no": "رقم المستند", "invoice_date": "YYYY-MM-DD",
+                "amount": 0.0, "vat": 0.0, "description": "البيان واسم المستفيد",
+                "category": "موردين / مواد / مقاولين / عمالة / نثريات",
+                "payment_method": "نقدي / شيك / تحويل"
+            })
+            inst_key = "inst_custody"
+            schema_key = "custody"
+
+        elif module_choice == "مستخلصات مقاولي الباطن":
+            curr_inst = curr_cfg.get("inst_subcontractor", "أنت مهندس ومراجع عقود مقاولي باطن. مهمتك مراجعة حصر الأعمال الحالية، نسب الإنجاز، استقطاع الدفعة المقدمة ومحتجز ضمان الأعمال.")
+            curr_schema = schemas.get("subcontractor", {
+                "subcontractor_name": "اسم مقاول الباطن", "ipc_no": "رقم المستخلص الجاري",
+                "current_work_value": 0.0, "retention_deduction": 0.0,
+                "advance_recovery": 0.0, "net_payable": 0.0, "statement_period": "فترة الأعمال"
+            })
+            inst_key = "inst_subcontractor"
+            schema_key = "subcontractor"
+
+        else:
+            curr_inst = curr_cfg.get("inst_client", "أنت خبير إدارة عقود ومستخلصات مالك. مهمتك تدقيق بنود الحصر ومطابقتها بجدول الكميات المعتمد (BOQ)، واحتساب المحتجزات والضريبة بدقة.")
+            curr_schema = schemas.get("client", {
+                "client_name": "اسم المالك / جهة الإسناد", "invoice_no": "رقم مستخلص العميل",
+                "work_executed_amount": 0.0, "retention_amount": 0.0,
+                "advance_payment_deduction": 0.0, "vat_amount": 0.0,
+                "net_payable": 0.0, "approval_status": "معتمد / قيد المراجعة"
+            })
+            inst_key = "inst_client"
+            schema_key = "client"
+
+        st.markdown(f"**التوجيه المحاسبي المعتمد لوحدة ({module_choice}):**")
+        updated_inst = st.text_area("نص التوجيه للنظام أثناء المعالجة:", value=curr_inst, height=100, key=f"inst_area_{schema_key}")
+
+        st.markdown(f"**هيكل الحقول الإلزامي المستخرج لوحدة ({module_choice}):**")
+        updated_schema_str = st.text_area(
+            "هيكل الحقول (JSON Schema):",
+            value=json.dumps(curr_schema, ensure_ascii=False, indent=2),
+            height=160,
+            key=f"schema_area_{schema_key}"
+        )
+
+        if st.button("💾 حفظ سياسات وتوجيهات الوحدة", type="primary", key=f"save_btn_{schema_key}", use_container_width=True):
+            try:
+                parsed_schema = json.loads(updated_schema_str)
+                curr_cfg["company_name"] = c_name_val
+                curr_cfg["company_id"] = c_id_val
+                curr_cfg[inst_key] = updated_inst
+                if "schemas" not in curr_cfg:
+                    curr_cfg["schemas"] = {}
+                curr_cfg["schemas"][schema_key] = parsed_schema
+
                 save_tuning_config(curr_cfg)
                 st.session_state.tuning_config = curr_cfg
-                st.success("تم تحديث إعدادات التوجيه بنجاح!")
-            
+                st.success(f"✅ تم حفظ السياسات المعتمدة لوحدة ({module_choice}) بنجاح!")
+            except Exception as e:
+                st.error(f"خطأ في صيغة JSON: {e}")
+
+    # ─── القسم الثاني: مستودع العينات المعتمدة ───
+    with t_tab2:
+        st.subheader("📚 مستودع العينات والقيود المعتمدة (Ground Truth Dataset)")
+        curr_curr = st.session_state.get("project_currency", "ج.م")
+
+        # التأكد من وجود معرّف ونوع الوحدة لكل عينة مسجلة مسبقاً
+        updated_ds_ids = False
+        for item in approved_ds:
+            if "id" not in item:
+                item["id"] = str(uuid.uuid4())
+                updated_ds_ids = True
+            if "module_type" not in item:
+                item["module_type"] = "custody"
+                updated_ds_ids = True
+        if updated_ds_ids:
+            save_approved_dataset(approved_ds)
+            st.session_state.approved_dataset = approved_ds
+
+        col_f1, col_f2 = st.columns([1.5, 2])
+        with col_f1:
+            filter_unit = st.selectbox(
+                "تصفية العينات حسب الوحدة:",
+                ["الكل", "فواتير ومصروفات العهد", "مستخلصات مقاولي الباطن", "مستخلصات العميل"],
+                key="ds_filter_unit_enhanced"
+            )
+        with col_f2:
+            search_query = st.text_input("🔍 بحث في المستندات أو البيانات:", placeholder="رقم المستند، البيان، اسم الجهة...", key="ds_search_in")
+
+        filtered_ds = approved_ds
+        if filter_unit == "فواتير ومصروفات العهد":
+            filtered_ds = [d for d in approved_ds if d.get("module_type", "custody") == "custody"]
+        elif filter_unit == "مستخلصات مقاولي الباطن":
+            filtered_ds = [d for d in approved_ds if d.get("module_type") == "subcontractor"]
+        elif filter_unit == "مستخلصات العميل":
+            filtered_ds = [d for d in approved_ds if d.get("module_type") == "client"]
+
+        if search_query.strip():
+            q = search_query.strip().lower()
+            filtered_ds = [
+                d for d in filtered_ds
+                if q in str(d.get("input_doc", "")).lower()
+                or q in str(d.get("ground_truth", {})).lower()
+            ]
+
+        st.markdown(f"إجمالي العينات المطابقة: **{len(filtered_ds)}** من أصل **{len(approved_ds)}** عينة موثقة")
+
+        if filtered_ds:
+            for idx, item in enumerate(filtered_ds):
+                gt = item.get("ground_truth", {})
+                sample_id = item.get("id", str(idx))
+                unit_label = {
+                    "custody": "🧾 فواتير وعهد",
+                    "subcontractor": "🏗️ مقاولو باطن",
+                    "client": "📑 مستخلصات عميل"
+                }.get(item.get("module_type", "custody"), "وثيقة")
+
+                doc_title = item.get("input_doc", "مستند بدون اسم")
+                sample_date = item.get("timestamp", "")[:10]
+                amount_val = float(gt.get("amount", gt.get("net_payable", gt.get("current_work_value", 0.0))))
+
+                with st.expander(f"{unit_label} | {doc_title} — {amount_val:,.2f} {curr_curr} ({sample_date})", expanded=False):
+                    c_det1, c_det2 = st.columns([3, 1])
+                    with c_det1:
+                        st.json(gt)
+                    with c_det2:
+                        st.markdown(f"**معرّف السجل:**\n\n{(sample_id or '')[:8]}...", unsafe_allow_html=True)
+                        st.markdown(f"المصدر: {item.get('source', 'نظام الاعتماد')}")
+                        if st.button("🗑️ حذف هذه العينة", key=f"del_sample_{sample_id}", type="secondary", use_container_width=True):
+                            approved_ds = [d for d in approved_ds if d.get("id") != sample_id]
+                            save_approved_dataset(approved_ds)
+                            st.session_state.approved_dataset = approved_ds
+                            st.toast("تم حذف العينة بنجاح!", icon="✅")
+                            time.sleep(0.4)
+                            st.rerun()
+
             st.divider()
-            st.markdown("#### 🚀 إنشاء وحفظ حزمة ضبط وتدريب جديدة:")
-            t_model_name = st.text_input("اسم إصدار حزمة الضبط:", value=f"alyoser-model-{datetime.date.today().strftime('%Y%m%d')}")
-            
-            if st.button("🚀 معالجة وتجهيز حزمة الضبط", type="primary"):
-                approved_ds = load_approved_dataset()
-                if not api_key:
-                    st.error("⚠️ مفتاح الربط غير متصل.")
-                elif len(approved_ds) == 0:
-                    st.warning("⚠️ لا توجد عينات معتمدة في المستودع حتى الآن.")
-                else:
-                    with st.spinner("جاري تحويل البيانات وتجهيز ملفات الحزمة بصيغة JSONL..."):
-                        training_dataset = []
-                        for sample in approved_ds:
-                            training_dataset.append({
-                                "text_input": f"وثيقة فاتورة: {sample.get('input_doc')}",
-                                "output": json.dumps(sample.get("ground_truth"), ensure_ascii=False)
-                            })
-                        
-                        jsonl_path = os.path.join(BASE_DIR, "training_data.jsonl")
-                        with open(jsonl_path, "w", encoding="utf-8") as jf:
-                            for item in training_dataset:
-                                jf.write(json.dumps(item, ensure_ascii=False) + "\n")
-                        
-                        st.info(f"📁 تم تجهيز ملف البيانات ({len(training_dataset)} عينة) بنجاح بصيغة JSONL.")
-                        
-                        new_tuned_id = f"tunedModels/{t_model_name.strip()}"
-                        curr_cfg["active_tuned_model"] = new_tuned_id
-                        curr_cfg["use_tuned_model"] = True
-                        save_tuning_config(curr_cfg)
-                        st.session_state.tuning_config = curr_cfg
-                        
-                        log_audit_event("TUNING_CONFIG", f"Configured model {new_tuned_id} with {len(training_dataset)} samples", current_user_data.get('name', 'Admin'), current_user_data.get('name', 'Admin'))
-                        st.success(f"🎉 تم تجهيز واعتماد حزمة النموذج: `{new_tuned_id}` بنجاح!")
-                        time.sleep(1)
-                        st.rerun()
+            col_clr1, _ = st.columns([2, 4])
+            with col_clr1:
+                if st.button("🗑️ مسح نتائج التصفية الحالية فقط", key="clr_filtered_btn", use_container_width=True):
+                    filtered_ids = {d.get("id") for d in filtered_ds}
+                    approved_ds = [d for d in approved_ds if d.get("id") not in filtered_ids]
+                    save_approved_dataset(approved_ds)
+                    st.session_state.approved_dataset = approved_ds
+                    st.toast("تم مسح العينات المحددة بنجاح!", icon="🧹")
+                    time.sleep(0.4)
+                    st.rerun()
+        else:
+            st.info("لا توجد عينات معتمدة مطابقة لشروط التصفية والبحث الحالية.")
+
+    # ─── القسم الثالث: التوجيه الذكي وقاموس المصطلحات ───
+    with t_tab3:
+        st.subheader("📖 قاموس المصطلحات، الموردين، والمقاولين المعتمد")
+        st.markdown("يستخدم هذا القاموس لتوجيه النظام لمطابقة الأسماء والتصنيفات بدقة عبر كافة مستندات المشروع:")
+
+        current_dict_text = st.text_area(
+            "قواعد المطابقة والتصنيف المعتمدة:",
+            value=st.session_state.system_dictionary,
+            height=200,
+            key="sys_dict_editor"
+        )
+
+        if st.button("💾 حفظ وتعميم القاموس", type="primary", use_container_width=True):
+            st.session_state.system_dictionary = current_dict_text
+            local_ok, cloud_ok = save_system_dictionary(current_dict_text)
+            if local_ok:
+                st.success("✅ تم حفظ القاموس الموحد وتعميمه على كافة وحدات النظام بنجاح!")
+            else:
+                st.error("تعذر حفظ القاموس محلياً، يرجى التحقق من أذونات الكتابة.")
 
 # ─── الفوتر ───
 st.markdown(f"""
